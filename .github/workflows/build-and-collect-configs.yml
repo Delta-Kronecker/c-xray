@@ -97,7 +97,7 @@ jobs:
         xray version
 
     - name: Build ProxyTester
-      working-directory: test
+      working-directory: xray_test
       run: |
         echo "=== Building ProxyTester ==="
         go build -o proxy-tester proxy-tester.go
@@ -109,7 +109,7 @@ jobs:
         mkdir -p data/working_url
 
     - name: Run ProxyTester
-      working-directory: test
+      working-directory: xray_test
       run: |
         echo "=== Running ProxyTester ==="
         ./proxy-tester
