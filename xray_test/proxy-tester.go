@@ -793,17 +793,12 @@ func (pt *ProxyTester) setupIncrementalSave() error {
 		ProtocolTUIC:         "tuic",
 	}
 
-	timestamp := time.Now().Format("2006-01-02 15:04:05")
-
 	for protocol, name := range protocols {
 		jsonFile, err := os.Create(filepath.Join(pt.config.DataDir, "working_json", fmt.Sprintf("working_%s.txt", name)))
 		if err != nil {
 			return err
 		}
 
-		jsonFile.WriteString(fmt.Sprintf("# Working %s Configurations (JSON Format)\n", strings.ToUpper(name)))
-		jsonFile.WriteString(fmt.Sprintf("# Generated at: %s\n", timestamp))
-		jsonFile.WriteString("# Format: Each line contains one working configuration in JSON\n\n")
 		pt.outputFiles[protocol] = jsonFile
 
 		urlFile, err := os.Create(filepath.Join(pt.config.DataDir, "working_url", fmt.Sprintf("working_%s_urls.txt", name)))
@@ -811,9 +806,6 @@ func (pt *ProxyTester) setupIncrementalSave() error {
 			return err
 		}
 
-		urlFile.WriteString(fmt.Sprintf("# Working %s Configurations (URL Format)\n", strings.ToUpper(name)))
-		urlFile.WriteString(fmt.Sprintf("# Generated at: %s\n", timestamp))
-		urlFile.WriteString("# Format: Each line contains one working configuration as URL\n\n")
 		pt.urlFiles[protocol] = urlFile
 	}
 
@@ -821,20 +813,12 @@ func (pt *ProxyTester) setupIncrementalSave() error {
 	if err != nil {
 		return err
 	}
-	generalJSONFile.WriteString("# All Working Configurations (JSON Format)\n")
-	generalJSONFile.WriteString(fmt.Sprintf("# Generated at: %s\n", timestamp))
-	generalJSONFile.WriteString("# Format: Each line contains one working configuration in JSON\n")
-	generalJSONFile.WriteString("# Protocols: Shadowsocks, ShadowsocksR, VMess, VLESS, Trojan, Hysteria, Hysteria2, TUIC\n\n")
 	pt.generalJSONFile = generalJSONFile
 
 	generalURLFile, err := os.Create(filepath.Join(pt.config.DataDir, "working_url", "all.txt"))
 	if err != nil {
 		return err
 	}
-	generalURLFile.WriteString("# All Working Configurations (URL Format)\n")
-	generalURLFile.WriteString(fmt.Sprintf("# Generated at: %s\n", timestamp))
-	generalURLFile.WriteString("# Format: Each line contains one working configuration as URL\n")
-	generalURLFile.WriteString("# Protocols: Shadowsocks, ShadowsocksR, VMess, VLESS, Trojan, Hysteria, Hysteria2, TUIC\n\n")
 	pt.generalURLFile = generalURLFile
 
 	log.Println("Incremental save files initialized")
@@ -1612,37 +1596,28 @@ func (pt *ProxyTester) saveConfigImmediately(result *TestResultData) {
 	}
 
 	protocol := result.Config.Protocol
-	timestamp := time.Now().Format("2006-01-02 15:04:05")
 
 	if file, ok := pt.outputFiles[protocol]; ok {
 		configLine := pt.createWorkingConfigLine(result)
-		fmt.Fprintf(file, "# Tested at: %s | Response: %.3fs | IP: %s\n",
-			timestamp, *result.ResponseTime, result.ExternalIP)
-		fmt.Fprintf(file, "%s\n\n", configLine)
+		fmt.Fprintf(file, "%s\n", configLine)
 		file.Sync()
 	}
 
 	if file, ok := pt.urlFiles[protocol]; ok {
 		configURL := pt.createConfigURL(result)
-		fmt.Fprintf(file, "# Tested at: %s | Response: %.3fs | IP: %s\n",
-			timestamp, *result.ResponseTime, result.ExternalIP)
-		fmt.Fprintf(file, "%s\n\n", configURL)
+		fmt.Fprintf(file, "%s\n", configURL)
 		file.Sync()
 	}
 
 	if pt.generalJSONFile != nil {
 		configLine := pt.createWorkingConfigLine(result)
-		fmt.Fprintf(pt.generalJSONFile, "# [%s] Tested at: %s | Response: %.3fs | IP: %s\n",
-			strings.ToUpper(string(protocol)), timestamp, *result.ResponseTime, result.ExternalIP)
-		fmt.Fprintf(pt.generalJSONFile, "%s\n\n", configLine)
+		fmt.Fprintf(pt.generalJSONFile, "%s\n", configLine)
 		pt.generalJSONFile.Sync()
 	}
 
 	if pt.generalURLFile != nil {
 		configURL := pt.createConfigURL(result)
-		fmt.Fprintf(pt.generalURLFile, "# [%s] Tested at: %s | Response: %.3fs | IP: %s\n",
-			strings.ToUpper(string(protocol)), timestamp, *result.ResponseTime, result.ExternalIP)
-		fmt.Fprintf(pt.generalURLFile, "%s\n\n", configURL)
+		fmt.Fprintf(pt.generalURLFile, "%s\n", configURL)
 		pt.generalURLFile.Sync()
 	}
 }
@@ -2374,60 +2349,58 @@ func main() {
 	}
 	defer tester.Cleanup()
 
-	// Define test order: VLESS, VMess, Shadowsocks
-	configFilesOrdered := []struct {
-		protocol ProxyProtocol
-		filePath string
-	}{
-		{ProtocolShadowsocks, filepath.Join(config.DataDir, "deduplicated_urls", "ss.json")},
-		{ProtocolShadowsocksR, filepath.Join(config.DataDir, "deduplicated_urls", "ssr.json")},
-		{ProtocolVMess, filepath.Join(config.DataDir, "deduplicated_urls", "vmess.json")},
-		{ProtocolVLESS, filepath.Join(config.DataDir, "deduplicated_urls", "vless.json")},
-		{ProtocolTrojan, filepath.Join(config.DataDir, "deduplicated_urls", "trojan.json")},
-		{ProtocolHysteria, filepath.Join(config.DataDir, "deduplicated_urls", "hy.json")},
-		{ProtocolHysteria2, filepath.Join(config.DataDir, "deduplicated_urls", "hysteria2.json")},
-		{ProtocolTUIC, filepath.Join(config.DataDir, "deduplicated_urls", "tuic.json")},
+	// Load all configs from Config directory
+	configDir := filepath.Join(config.DataDir, "Config")
+
+	log.Println(strings.Repeat("=", 70))
+	log.Printf(" Loading configurations from: %s", configDir)
+	log.Println(strings.Repeat("=", 70))
+
+	// Find all JSON files in Config directory
+	jsonFiles, err := filepath.Glob(filepath.Join(configDir, "*.json"))
+	if err != nil {
+		log.Fatalf("Failed to find config files: %v", err)
 	}
 
-	var allResults []*TestResultData
+	if len(jsonFiles) == 0 {
+		log.Printf("No JSON config files found in: %s", configDir)
+		log.Println("No working configurations found")
+		return
+	}
+
+	log.Printf("Found %d configuration files", len(jsonFiles))
+
+	// Load all configs
+	var allConfigs []ProxyConfig
+	for _, jsonFile := range jsonFiles {
+		// Try to load as different protocol types
+		for _, protocol := range AllProtocols {
+			configs, err := tester.LoadConfigsFromJSON(jsonFile, protocol)
+			if err == nil && len(configs) > 0 {
+				allConfigs = append(allConfigs, configs...)
+				break // Successfully loaded, move to next file
+			}
+		}
+	}
+
+	if len(allConfigs) == 0 {
+		log.Println("No valid configurations could be loaded")
+		log.Println("No working configurations found")
+		return
+	}
+
+	log.Printf("Loaded %d valid configurations", len(allConfigs))
+	log.Println(strings.Repeat("=", 70))
+	log.Printf(" Starting tests for all configurations")
+	log.Println(strings.Repeat("=", 70))
+
+	// Test all configs
+	allResults := tester.RunTests(allConfigs)
+
 	totalWorkingConfigs := 0
-
-	for _, configFile := range configFilesOrdered {
-		protocol := configFile.protocol
-		filePath := configFile.filePath
-
-		log.Println(strings.Repeat("=", 70))
-		log.Printf(" Starting tests for %s protocol", strings.ToUpper(string(protocol)))
-		log.Println(strings.Repeat("=", 70))
-
-		if _, err := os.Stat(filePath); err == nil {
-			configs, err := tester.LoadConfigsFromJSON(filePath, protocol)
-			if err != nil {
-				log.Printf("Failed to load %s configs: %v", protocol, err)
-				continue
-			}
-
-			if len(configs) == 0 {
-				log.Printf("No valid %s configurations found", protocol)
-				continue
-			}
-
-			log.Printf("Testing %d %s configurations...", len(configs), protocol)
-
-			results := tester.RunTests(configs)
-			allResults = append(allResults, results...)
-
-			workingCount := 0
-			for _, result := range results {
-				if result.Result == ResultSuccess {
-					workingCount++
-				}
-			}
-			totalWorkingConfigs += workingCount
-
-			log.Printf(" %s testing completed: %d working configurations found", strings.ToUpper(string(protocol)), workingCount)
-		} else {
-			log.Printf("Config file not found: %s", filePath)
+	for _, result := range allResults {
+		if result.Result == ResultSuccess {
+			totalWorkingConfigs++
 		}
 	}
 
@@ -2438,8 +2411,8 @@ func main() {
 		log.Printf("\nWorking configurations saved to:")
 		log.Printf("  JSON: %s/working_json/working_*.txt", config.DataDir)
 		log.Printf("  URL: %s/working_url/working_*_urls.txt", config.DataDir)
-		log.Printf("  All configs (JSON): %s/working_json/working_all_configs.txt", config.DataDir)
-		log.Printf("  All configs (URL): %s/working_url/working_all_urls.txt", config.DataDir)
+		log.Printf("  All configs (JSON): %s/working_json/all.txt", config.DataDir)
+		log.Printf("  All configs (URL): %s/working_url/all.txt", config.DataDir)
 		log.Println(strings.Repeat("=", 70))
 	} else {
 		log.Println("No working configurations found")
