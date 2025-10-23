@@ -1110,7 +1110,7 @@ func (fm *FileManager) initialize() error {
 		fm.urlFiles[protocol] = urlFile
 	}
 
-	generalJSONFile, err := os.Create(filepath.Join(fm.config.DataDir, "working_json", "working_all_configs.txt"))
+	generalJSONFile, err := os.Create(filepath.Join(fm.config.DataDir, "working_json", "all.txt"))
 	if err != nil {
 		return err
 	}
@@ -1118,7 +1118,7 @@ func (fm *FileManager) initialize() error {
 	generalJSONFile.WriteString(fmt.Sprintf("# Generated at: %s\n\n", timestamp))
 	fm.generalJSONFile = generalJSONFile
 
-	generalURLFile, err := os.Create(filepath.Join(fm.config.DataDir, "working_url", "working_all_urls.txt"))
+	generalURLFile, err := os.Create(filepath.Join(fm.config.DataDir, "working_url", "all.txt"))
 	if err != nil {
 		return err
 	}
