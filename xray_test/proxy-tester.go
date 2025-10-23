@@ -58,6 +58,11 @@ const (
 	ProtocolTUIC          ProxyProtocol = "tuic"
 )
 
+var AllProtocols = []ProxyProtocol{
+	ProtocolShadowsocks, ProtocolShadowsocksR, ProtocolVMess, ProtocolVLESS,
+	ProtocolTrojan, ProtocolHysteria, ProtocolHysteria2, ProtocolTUIC,
+}
+
 type Config struct {
 	XrayPath        string
 	MaxWorkers      int
