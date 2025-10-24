@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/md5"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -1652,6 +1653,12 @@ func (pt *ProxyTester) saveConfigImmediately(result *TestResultData) {
 
 	protocol := result.Config.Protocol
 
+	// Increment counter once for this config
+	pt.counterMu.Lock()
+	pt.configCounter++
+	counter := pt.configCounter
+	pt.counterMu.Unlock()
+
 	if file, ok := pt.outputFiles[protocol]; ok {
 		configLine := pt.createWorkingConfigLine(result)
 		fmt.Fprintf(file, "%s\n", configLine)
@@ -1660,6 +1667,8 @@ func (pt *ProxyTester) saveConfigImmediately(result *TestResultData) {
 
 	if file, ok := pt.urlFiles[protocol]; ok {
 		configURL := pt.createConfigURL(result)
+		// Add fire emoji name to protocol-specific files too
+		configURL = pt.addConfigName(configURL, fmt.Sprintf("🔥%d🔥", counter))
 		fmt.Fprintf(file, "%s\n", configURL)
 		file.Sync()
 	}
@@ -1671,11 +1680,6 @@ func (pt *ProxyTester) saveConfigImmediately(result *TestResultData) {
 	}
 
 	if pt.generalURLFile != nil {
-		pt.counterMu.Lock()
-		pt.configCounter++
-		counter := pt.configCounter
-		pt.counterMu.Unlock()
-
 		configURL := pt.createConfigURL(result)
 		// Add name with fire emoji and number
 		configURL = pt.addConfigName(configURL, fmt.Sprintf("🔥%d🔥", counter))
@@ -2125,8 +2129,8 @@ func (pt *ProxyTester) RunTests(configs []ProxyConfig) []*TestResultData {
 			pt.cleanupBetweenBatches()
 
 			// Add 10-second rest between batches
-			log.Printf("⏸️  Resting for 5 seconds before next batch...")
-			time.Sleep(5 * time.Second)
+			log.Printf("⏸️  Resting for 10 seconds before next batch...")
+			time.Sleep(10 * time.Second)
 		}
 	}
 
