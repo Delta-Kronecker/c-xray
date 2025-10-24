@@ -82,9 +82,9 @@ func NewDefaultConfig() *Config {
 
 	return &Config{
 		XrayPath:        getEnvOrDefault("XRAY_PATH", ""),
-		MaxWorkers:      getEnvIntOrDefault("PROXY_MAX_WORKERS", 200),
-		Timeout:         time.Duration(getEnvIntOrDefault("PROXY_TIMEOUT", 5)) * time.Second,
-		BatchSize:       getEnvIntOrDefault("PROXY_BATCH_SIZE", 400),
+		MaxWorkers:      getEnvIntOrDefault("PROXY_MAX_WORKERS", 300),
+		Timeout:         time.Duration(getEnvIntOrDefault("PROXY_TIMEOUT", 10)) * time.Second,
+		BatchSize:       getEnvIntOrDefault("PROXY_BATCH_SIZE", 300),
 		IncrementalSave: getEnvBoolOrDefault("PROXY_INCREMENTAL_SAVE", true),
 		DataDir:         dataDir,
 		ConfigDir:       configDir,
@@ -2128,8 +2128,8 @@ func (pt *ProxyTester) RunTests(configs []ProxyConfig) []*TestResultData {
 			pt.cleanupBetweenBatches()
 
 			// Add 10-second rest between batches
-			log.Printf("⏸️  Resting for 10 seconds before next batch...")
-			time.Sleep(10 * time.Second)
+			log.Printf("⏸️  Resting for 5 seconds before next batch...")
+			time.Sleep(5 * time.Second)
 		}
 	}
 
