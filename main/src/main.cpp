@@ -6,9 +6,12 @@
 #include "../include/HttpHelper.h"
 #include "../include/SubParser.h"
 
-// Generate unique key for deduplication (server only)
+// Generate unique key for deduplication (protocol + server + port)
 QString GenerateConfigKey(const std::shared_ptr<ProxyBean> &bean) {
-    return bean->serverAddress;
+    return QString("%1://%2:%3")
+        .arg(bean->type)
+        .arg(bean->serverAddress)
+        .arg(bean->serverPort);
 }
 
 int main(int argc, char *argv[]) {
