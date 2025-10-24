@@ -830,6 +830,119 @@ func (pt *ProxyTester) setupIncrementalSave() error {
 	return nil
 }
 
+// LoadConfigFromCollectorJSON loads a single config file created by ConfigCollector
+func (pt *ProxyTester) LoadConfigFromCollectorJSON(filePath string, seenHashes map[string]bool) (*ProxyConfig, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var rawConfig map[string]interface{}
+	if err := json.NewDecoder(file).Decode(&rawConfig); err != nil {
+		return nil, err
+	}
+
+	configType, ok := rawConfig["type"].(string)
+	if !ok {
+		return nil, fmt.Errorf("missing or invalid 'type' field")
+	}
+
+	config := ProxyConfig{
+		Remarks: getString(rawConfig, "name"),
+		Server:  getString(rawConfig, "server"),
+		Port:    getInt(rawConfig, "port"),
+	}
+
+	switch configType {
+	case "vmess":
+		config.Protocol = ProtocolVMess
+		config.UUID = getString(rawConfig, "uuid")
+		config.AlterID = getInt(rawConfig, "alterId")
+		config.Cipher = getString(rawConfig, "cipher")
+		config.Network = getStringOrDefault(rawConfig, "network", "tcp")
+		config.TLS = getString(rawConfig, "tls")
+		config.SNI = getString(rawConfig, "sni")
+		config.Host = getString(rawConfig, "host")
+		config.Path = getString(rawConfig, "path")
+
+	case "vless":
+		config.Protocol = ProtocolVLESS
+		config.UUID = getString(rawConfig, "password")
+		config.Flow = getString(rawConfig, "flow")
+		config.Network = getStringOrDefault(rawConfig, "network", "tcp")
+		config.TLS = getString(rawConfig, "security")
+		config.SNI = getString(rawConfig, "sni")
+		config.Host = getString(rawConfig, "host")
+		config.Path = getString(rawConfig, "path")
+		config.Encrypt = "none"
+
+	case "trojan":
+		config.Protocol = ProtocolTrojan
+		config.Password = getString(rawConfig, "password")
+		config.Network = getStringOrDefault(rawConfig, "network", "tcp")
+		config.TLS = getStringOrDefault(rawConfig, "security", "tls")
+		config.SNI = getString(rawConfig, "sni")
+		config.Host = getString(rawConfig, "host")
+		config.Path = getString(rawConfig, "path")
+
+	case "shadowsocks", "ss":
+		config.Protocol = ProtocolShadowsocks
+		config.Method = getString(rawConfig, "method")
+		config.Password = getString(rawConfig, "password")
+		config.Network = "tcp"
+
+	default:
+		return nil, fmt.Errorf("unsupported protocol: %s", configType)
+	}
+
+	if !pt.isValidConfig(&config) {
+		return nil, fmt.Errorf("invalid config")
+	}
+
+	// Check for duplicates
+	hash := pt.getConfigHash(&config)
+	if seenHashes[hash] {
+		return nil, nil // Duplicate, skip silently
+	}
+	seenHashes[hash] = true
+
+	return &config, nil
+}
+
+// Helper functions for JSON parsing
+func getString(data map[string]interface{}, key string) string {
+	if val, ok := data[key]; ok {
+		if str, ok := val.(string); ok {
+			return str
+		}
+	}
+	return ""
+}
+
+func getStringOrDefault(data map[string]interface{}, key, defaultValue string) string {
+	if str := getString(data, key); str != "" {
+		return str
+	}
+	return defaultValue
+}
+
+func getInt(data map[string]interface{}, key string) int {
+	if val, ok := data[key]; ok {
+		switch v := val.(type) {
+		case float64:
+			return int(v)
+		case int:
+			return v
+		case string:
+			if intVal, err := strconv.Atoi(v); err == nil {
+				return intVal
+			}
+		}
+	}
+	return 0
+}
+
 func (pt *ProxyTester) LoadConfigsFromJSON(filePath string, protocol ProxyProtocol) ([]ProxyConfig, error) {
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		return nil, fmt.Errorf("configuration file not found: %s", filePath)
@@ -2377,14 +2490,16 @@ func main() {
 
 	// Load all configs
 	var allConfigs []ProxyConfig
+	seenHashes := make(map[string]bool)
+
 	for _, jsonFile := range jsonFiles {
-		// Try to load as different protocol types
-		for _, protocol := range AllProtocols {
-			configs, err := tester.LoadConfigsFromJSON(jsonFile, protocol)
-			if err == nil && len(configs) > 0 {
-				allConfigs = append(allConfigs, configs...)
-				break // Successfully loaded, move to next file
-			}
+		config, err := tester.LoadConfigFromCollectorJSON(jsonFile, seenHashes)
+		if err != nil {
+			log.Printf("Failed to load %s: %v", filepath.Base(jsonFile), err)
+			continue
+		}
+		if config != nil {
+			allConfigs = append(allConfigs, *config)
 		}
 	}
 
