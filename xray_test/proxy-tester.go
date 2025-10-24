@@ -2125,8 +2125,8 @@ func (pt *ProxyTester) RunTests(configs []ProxyConfig) []*TestResultData {
 			pt.cleanupBetweenBatches()
 
 			// Add 10-second rest between batches
-			log.Printf("⏸️  Resting for 10 seconds before next batch...")
-			time.Sleep(10 * time.Second)
+			log.Printf("⏸️  Resting for 5 seconds before next batch...")
+			time.Sleep(5 * time.Second)
 		}
 	}
 
