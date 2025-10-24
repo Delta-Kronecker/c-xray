@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/md5"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -728,6 +729,8 @@ type ProxyTester struct {
 
 	stats             sync.Map
 	resultsMu         sync.Mutex
+	configCounter     int
+	counterMu         sync.Mutex
 }
 
 func NewProxyTester(config *Config) (*ProxyTester, error) {
@@ -1669,7 +1672,14 @@ func (pt *ProxyTester) saveConfigImmediately(result *TestResultData) {
 	}
 
 	if pt.generalURLFile != nil {
+		pt.counterMu.Lock()
+		pt.configCounter++
+		counter := pt.configCounter
+		pt.counterMu.Unlock()
+
 		configURL := pt.createConfigURL(result)
+		// Add name with fire emoji and number
+		configURL = pt.addConfigName(configURL, fmt.Sprintf("🔥%d🔥", counter))
 		fmt.Fprintf(pt.generalURLFile, "%s\n", configURL)
 		pt.generalURLFile.Sync()
 	}
@@ -1744,6 +1754,15 @@ func (pt *ProxyTester) createWorkingConfigLine(result *TestResultData) string {
 
 	jsonBytes, _ := json.Marshal(data)
 	return string(jsonBytes)
+}
+
+func (pt *ProxyTester) addConfigName(configURL, name string) string {
+	// Replace the fragment (part after #) with the new name
+	if idx := strings.Index(configURL, "#"); idx != -1 {
+		return configURL[:idx] + "#" + url.QueryEscape(name)
+	}
+	// If no fragment exists, add it
+	return configURL + "#" + url.QueryEscape(name)
 }
 
 func (pt *ProxyTester) createConfigURL(result *TestResultData) string {
