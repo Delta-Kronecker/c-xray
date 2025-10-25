@@ -124,6 +124,7 @@ type ProxyConfig struct {
 	Server   string        `json:"server"`
 	Port     int           `json:"port"`
 	Remarks  string        `json:"remarks"`
+	Source   string        `json:"source,omitempty"`
 
 	Method   string `json:"method,omitempty"`
 	Password string `json:"password,omitempty"`
@@ -714,6 +715,12 @@ func (pm *ProcessManager) ForceCleanupAll() int {
 	return len(cmdsToKill)
 }
 
+type SourceStats struct {
+	TotalConfigs   int64
+	SuccessConfigs int64
+	FailedConfigs  int64
+}
+
 type ProxyTester struct {
 	config            *Config
 	portManager       *PortManager
@@ -727,6 +734,7 @@ type ProxyTester struct {
 	generalURLFile    *os.File
 
 	stats             sync.Map
+	sourceStats       sync.Map  // map[string]*SourceStats - stats per subscription source
 	resultsMu         sync.Mutex
 	configCounter     int
 	counterMu         sync.Mutex
@@ -853,6 +861,7 @@ func (pt *ProxyTester) LoadConfigFromCollectorJSON(filePath string) (*ProxyConfi
 		Remarks: getString(rawConfig, "name"),
 		Server:  getString(rawConfig, "server"),
 		Port:    getInt(rawConfig, "port"),
+		Source:  getString(rawConfig, "source"),
 	}
 
 	switch configType {
@@ -2026,6 +2035,19 @@ func (pt *ProxyTester) updateStats(result *TestResultData) {
 			atomic.AddInt64(stats["failed"], 1)
 		}
 	}
+
+	// Update per-source statistics
+	if result.Config.Source != "" {
+		value, _ := pt.sourceStats.LoadOrStore(result.Config.Source, &SourceStats{})
+		srcStats := value.(*SourceStats)
+
+		atomic.AddInt64(&srcStats.TotalConfigs, 1)
+		if result.Result == ResultSuccess {
+			atomic.AddInt64(&srcStats.SuccessConfigs, 1)
+		} else {
+			atomic.AddInt64(&srcStats.FailedConfigs, 1)
+		}
+	}
 }
 
 func (pt *ProxyTester) TestConfigs(configs []ProxyConfig, batchID int) []*TestResultData {
@@ -2340,6 +2362,48 @@ func (pt *ProxyTester) printFinalSummary(results []*TestResultData) {
 			}
 		}
 	}
+
+	// Display per-subscription statistics
+	log.Println("\nSubscription Source Breakdown:")
+	log.Println(strings.Repeat("-", 100))
+	log.Printf("%-60s | %8s | %8s | %8s | %8s", "Subscription URL", "Total", "Success", "Failed", "Success%")
+	log.Println(strings.Repeat("-", 100))
+
+	var totalSubConfigs, totalSubSuccess, totalSubFailed int64
+	pt.sourceStats.Range(func(key, value interface{}) bool {
+		source := key.(string)
+		stats := value.(*SourceStats)
+
+		total := atomic.LoadInt64(&stats.TotalConfigs)
+		success := atomic.LoadInt64(&stats.SuccessConfigs)
+		failed := atomic.LoadInt64(&stats.FailedConfigs)
+
+		totalSubConfigs += total
+		totalSubSuccess += success
+		totalSubFailed += failed
+
+		shortSource := source
+		if len(shortSource) > 60 {
+			shortSource = shortSource[:57] + "..."
+		}
+
+		successPct := float64(0)
+		if total > 0 {
+			successPct = float64(success) / float64(total) * 100
+		}
+
+		log.Printf("%-60s | %8d | %8d | %8d | %7.1f%%",
+			shortSource, total, success, failed, successPct)
+		return true
+	})
+
+	log.Println(strings.Repeat("-", 100))
+	overallSuccessPct := float64(0)
+	if totalSubConfigs > 0 {
+		overallSuccessPct = float64(totalSubSuccess) / float64(totalSubConfigs) * 100
+	}
+	log.Printf("%-60s | %8d | %8d | %8d | %7.1f%%",
+		"TOTAL", totalSubConfigs, totalSubSuccess, totalSubFailed, overallSuccessPct)
 
 	if len(successTimes) > 0 {
 		var sum float64
