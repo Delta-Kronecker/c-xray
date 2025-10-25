@@ -64,6 +64,7 @@ QJsonObject VMessBean::ToJson() {
     if (!sni.isEmpty()) obj["sni"] = sni;
     if (!host.isEmpty()) obj["host"] = host;
     if (!path.isEmpty()) obj["path"] = path;
+    if (!source.isEmpty()) obj["source"] = source;
     return obj;
 }
 
@@ -114,6 +115,7 @@ QJsonObject ShadowSocksBean::ToJson() {
     obj["port"] = serverPort;
     obj["method"] = method;
     obj["password"] = password;
+    if (!source.isEmpty()) obj["source"] = source;
     return obj;
 }
 
@@ -165,6 +167,7 @@ QJsonObject TrojanVLESSBean::ToJson() {
     if (!host.isEmpty()) obj["host"] = host;
     if (!path.isEmpty()) obj["path"] = path;
     if (!flow.isEmpty() && type == "vless") obj["flow"] = flow;
+    if (!source.isEmpty()) obj["source"] = source;
     return obj;
 }
 
@@ -209,5 +212,6 @@ QJsonObject SocksHttpBean::ToJson() {
     obj["port"] = serverPort;
     if (!username.isEmpty()) obj["username"] = username;
     if (!password.isEmpty()) obj["password"] = password;
+    if (!source.isEmpty()) obj["source"] = source;
     return obj;
 }
