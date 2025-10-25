@@ -10,6 +10,7 @@ public:
     QString name;
     QString serverAddress;
     int serverPort = 0;
+    QString source;  // Subscription URL source
 
     virtual ~ProxyBean() = default;
     virtual bool TryParseLink(const QString &link) = 0;
