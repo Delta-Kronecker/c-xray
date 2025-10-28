@@ -84,7 +84,7 @@ func NewDefaultConfig() *Config {
 	return &Config{
 		XrayPath:        getEnvOrDefault("XRAY_PATH", ""),
 		MaxWorkers:      getEnvIntOrDefault("PROXY_MAX_WORKERS", 300),
-		Timeout:         time.Duration(getEnvIntOrDefault("PROXY_TIMEOUT", 30)) * time.Second,
+		Timeout:         time.Duration(getEnvIntOrDefault("PROXY_TIMEOUT", 10)) * time.Second,
 		BatchSize:       getEnvIntOrDefault("PROXY_BATCH_SIZE", 300),
 		IncrementalSave: getEnvBoolOrDefault("PROXY_INCREMENTAL_SAVE", true),
 		DataDir:         dataDir,
@@ -316,7 +316,7 @@ func (nt *NetworkTester) TestProxyConnection(proxyPort int) (bool, string, float
 		shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
 	})
 
-	// Test all 4 URLs - ALL must succeed
+	// Test all 4 URLs - at least 1 must succeed (changed from ALL must succeed)
 	successCount := 0
 	var responseTimes []float64
 
@@ -329,18 +329,18 @@ func (nt *NetworkTester) TestProxyConnection(proxyPort int) (bool, string, float
 		log.Printf("  URL %d/4 (%s): %s", i+1, testURL, map[bool]string{true: "✅ SUCCESS", false: "❌ FAILED"}[success])
 	}
 
-	// Only consider successful if ALL 4 URLs pass
-	if successCount == 4 {
-		// Return average response time
+	// Consider successful if AT LEAST 1 URL passes (changed from ALL 4)
+	if successCount >= 1 {
+		// Return average response time of successful URLs
 		var avgTime float64
 		for _, rt := range responseTimes {
 			avgTime += rt
 		}
 		avgTime = avgTime / float64(len(responseTimes))
-		return true, "All URLs passed", avgTime
+		return true, fmt.Sprintf("%d/4 URLs passed", successCount), avgTime
 	}
 
-	return false, fmt.Sprintf("Only %d/4 URLs passed", successCount), time.Since(startTime).Seconds()
+	return false, fmt.Sprintf("0/4 URLs passed", successCount), time.Since(startTime).Seconds()
 }
 
 func (nt *NetworkTester) isProxyResponsive(port int) bool {
@@ -768,6 +768,7 @@ type ProxyTester struct {
 	generalJSONFile   *os.File
 	generalURLFile    *os.File
 	allURLsPassedFile *os.File  // File for configs that passed ALL 4 URL tests
+	allURLs4of4File  *os.File  // File for configs that passed 4/4 URL tests
 
 	stats             sync.Map
 	sourceStats       sync.Map  // map[string]*SourceStats - stats per subscription source
@@ -877,6 +878,13 @@ func (pt *ProxyTester) setupIncrementalSave() error {
 		return err
 	}
 	pt.allURLsPassedFile = allURLsPassedFile
+
+	// Create file for configs that passed ALL 4 URL tests (4/4)
+	allURLs4of4File, err := os.Create(filepath.Join(pt.config.DataDir, "working_url", "all_urls_4of4.txt"))
+	if err != nil {
+		return err
+	}
+	pt.allURLs4of4File = allURLs4of4File
 
 	log.Println("Incremental save files initialized")
 	return nil
@@ -1740,7 +1748,7 @@ func (pt *ProxyTester) saveConfigImmediately(result *TestResultData) {
 	}
 
 	// Save to special file for configs that passed ALL 4 URL tests
-	if pt.allURLsPassedFile != nil && result.ExternalIP == "All URLs passed" {
+	if pt.allURLsPassedFile != nil && strings.Contains(result.ExternalIP, "4/4 URLs passed") {
 		configURL := pt.createConfigURL(result)
 		// Add special emoji for all-URLs-passed configs
 		configURL = pt.addConfigName(configURL, fmt.Sprintf("⭐%d⭐", counter))
@@ -1748,6 +1756,18 @@ func (pt *ProxyTester) saveConfigImmediately(result *TestResultData) {
 		pt.allURLsPassedFile.Sync()
 
 		log.Printf("🌟 SAVED TO ALL-URLS-PASSED: %s://%s:%d",
+			result.Config.Protocol, result.Config.Server, result.Config.Port)
+	}
+
+	// Save to special file for configs that passed 4/4 URL tests
+	if pt.allURLs4of4File != nil && strings.Contains(result.ExternalIP, "4/4 URLs passed") {
+		configURL := pt.createConfigURL(result)
+		// Add special emoji for 4/4-URLs-passed configs
+		configURL = pt.addConfigName(configURL, fmt.Sprintf("🔥%d🔥", counter))
+		fmt.Fprintf(pt.allURLs4of4File, "%s\n", configURL)
+		pt.allURLs4of4File.Sync()
+
+		log.Printf("🔥 SAVED TO ALL-URLS-4OF4: %s://%s:%d",
 			result.Config.Protocol, result.Config.Server, result.Config.Port)
 	}
 }
@@ -2715,6 +2735,9 @@ func (pt *ProxyTester) Cleanup() {
 	}
 	if pt.allURLsPassedFile != nil {
 		pt.allURLsPassedFile.Close()
+	}
+	if pt.allURLs4of4File != nil {
+		pt.allURLs4of4File.Close()
 	}
 
 	pt.processManager.Cleanup()
