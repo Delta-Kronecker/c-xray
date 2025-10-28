@@ -73,6 +73,7 @@ type Config struct {
 	LogDir          string
 	StartPort       int
 	EndPort         int
+	MaxRetries      int  // Maximum number of retries for failed configs
 }
 
 func NewDefaultConfig() *Config {
@@ -82,15 +83,16 @@ func NewDefaultConfig() *Config {
 
 	return &Config{
 		XrayPath:        getEnvOrDefault("XRAY_PATH", ""),
-		MaxWorkers:      getEnvIntOrDefault("PROXY_MAX_WORKERS", 200),
-		Timeout:         time.Duration(getEnvIntOrDefault("PROXY_TIMEOUT", 5)) * time.Second,
-		BatchSize:       getEnvIntOrDefault("PROXY_BATCH_SIZE", 400),
+		MaxWorkers:      getEnvIntOrDefault("PROXY_MAX_WORKERS", 300),
+		Timeout:         time.Duration(getEnvIntOrDefault("PROXY_TIMEOUT", 30)) * time.Second,
+		BatchSize:       getEnvIntOrDefault("PROXY_BATCH_SIZE", 300),
 		IncrementalSave: getEnvBoolOrDefault("PROXY_INCREMENTAL_SAVE", true),
 		DataDir:         dataDir,
 		ConfigDir:       configDir,
 		LogDir:          logDir,
 		StartPort:       getEnvIntOrDefault("PROXY_START_PORT", 10000),
-		EndPort:         getEnvIntOrDefault("PROXY_END_PORT", 20000),
+		EndPort:         getEnvIntOrDefault("PROXY_END_PORT", 60000),
+		MaxRetries:      getEnvIntOrDefault("PROXY_MAX_RETRIES", 2),
 	}
 }
 
@@ -169,6 +171,7 @@ type TestResultData struct {
 	ExternalIP   string      `json:"external_ip,omitempty"`
 	ProxyPort    *int        `json:"proxy_port,omitempty"`
 	BatchID      *int        `json:"batch_id,omitempty"`
+	RetryCount   int         `json:"retry_count,omitempty"`
 }
 
 type PortManager struct {
@@ -278,14 +281,10 @@ func NewNetworkTester(timeout time.Duration) *NetworkTester {
 	return &NetworkTester{
 		timeout: timeout,
 		testURLs: []string{
-			"http://httpbin.org/ip",
-			"http://icanhazip.com",
-			"http://ifconfig.me/ip",
-			"http://api.ipify.org",
-			"http://ipinfo.io/ip",
-			"http://checkip.amazonaws.com",
-			"https://httpbin.org/ip",
-			"https://icanhazip.com",
+			"http://www.gstatic.com/generate_204",
+			"http://cp.cloudflare.com",
+			"http://detectportal.firefox.com",
+			"http://connectivitycheck.gstatic.com/generate_204",
 		},
 		client: &http.Client{Timeout: timeout},
 	}
@@ -300,13 +299,13 @@ func (nt *NetworkTester) TestProxyConnection(proxyPort int) (bool, string, float
 		if nt.isProxyResponsive(proxyPort) {
 			break
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)  // Increased from 100ms to 200ms
 	}
 	if !nt.isProxyResponsive(proxyPort) {
 		return false, "", time.Since(startTime).Seconds()
 	}
 
-	testCount := 4
+	testCount := 4  // Test all 4 URLs
 	if len(nt.testURLs) < testCount {
 		testCount = len(nt.testURLs)
 	}
@@ -317,18 +316,35 @@ func (nt *NetworkTester) TestProxyConnection(proxyPort int) (bool, string, float
 		shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
 	})
 
-	for i := 0; i < testCount; i++ {
-		success, ip, responseTime := nt.singleTest(proxyPort, shuffled[i])
+	// Test all 4 URLs - ALL must succeed
+	successCount := 0
+	var responseTimes []float64
+
+	for i, testURL := range shuffled {
+		success, _, responseTime := nt.singleTest(proxyPort, testURL)
 		if success {
-			return true, ip, responseTime
+			successCount++
+			responseTimes = append(responseTimes, responseTime)
 		}
+		log.Printf("  URL %d/4 (%s): %s", i+1, testURL, map[bool]string{true: "✅ SUCCESS", false: "❌ FAILED"}[success])
 	}
 
-	return false, "", time.Since(startTime).Seconds()
+	// Only consider successful if ALL 4 URLs pass
+	if successCount == 4 {
+		// Return average response time
+		var avgTime float64
+		for _, rt := range responseTimes {
+			avgTime += rt
+		}
+		avgTime = avgTime / float64(len(responseTimes))
+		return true, "All URLs passed", avgTime
+	}
+
+	return false, fmt.Sprintf("Only %d/4 URLs passed", successCount), time.Since(startTime).Seconds()
 }
 
 func (nt *NetworkTester) isProxyResponsive(port int) bool {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 3*time.Second)  // Increased from 1s to 3s
 	if err != nil {
 		return false
 	}
@@ -347,8 +363,8 @@ func (nt *NetworkTester) singleTest(proxyPort int, testURL string) (bool, string
 	transport := &http.Transport{
 		Dial:                dialer.Dial,
 		DisableKeepAlives:   true,
-		TLSHandshakeTimeout: 5 * time.Second,
-		IdleConnTimeout:     time.Second,
+		TLSHandshakeTimeout: 15 * time.Second,  // Increased from 5s to 15s
+		IdleConnTimeout:     5 * time.Second,    // Increased from 1s to 5s
 	}
 
 	client := &http.Client{
@@ -372,21 +388,40 @@ func (nt *NetworkTester) singleTest(proxyPort int, testURL string) (bool, string
 	}
 
 	responseTime := time.Since(startTime).Seconds()
-	ipText := strings.TrimSpace(string(body))
+	bodyText := strings.TrimSpace(string(body))
 
-	if strings.Contains(resp.Header.Get("Content-Type"), "json") {
-		var data map[string]interface{}
-		if json.Unmarshal(body, &data) == nil {
-			if origin, ok := data["origin"].(string); ok {
-				ipText = origin
-			} else if ip, ok := data["ip"].(string); ok {
-				ipText = ip
+	// For connectivity test URLs, success is determined by HTTP status and response content
+	// These URLs don't return IP addresses, so we check for expected responses
+	switch testURL {
+	case "http://www.gstatic.com/generate_204", "http://connectivitycheck.gstatic.com/generate_204":
+		// These should return 204 No Content or empty body
+		return true, testURL, responseTime
+	case "http://cp.cloudflare.com":
+		// Should return some content
+		if len(bodyText) > 0 {
+			return true, testURL, responseTime
+		}
+	case "http://detectportal.firefox.com":
+		// Should return success indicator
+		if len(bodyText) > 0 {
+			return true, testURL, responseTime
+		}
+	default:
+		// Fallback to IP checking for any other URLs
+		if strings.Contains(resp.Header.Get("Content-Type"), "json") {
+			var data map[string]interface{}
+			if json.Unmarshal(body, &data) == nil {
+				if origin, ok := data["origin"].(string); ok {
+					bodyText = origin
+				} else if ip, ok := data["ip"].(string); ok {
+					bodyText = ip
+				}
 			}
 		}
-	}
 
-	if net.ParseIP(ipText) != nil {
-		return true, ipText, responseTime
+		if net.ParseIP(bodyText) != nil {
+			return true, bodyText, responseTime
+		}
 	}
 
 	return false, "", responseTime
@@ -419,7 +454,7 @@ func findXrayExecutable() string {
 }
 
 func (xcg *XrayConfigGenerator) ValidateXray() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)  // Increased from 5s to 15s
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, xcg.xrayPath, "version")
@@ -732,6 +767,7 @@ type ProxyTester struct {
 	urlFiles          map[ProxyProtocol]*os.File
 	generalJSONFile   *os.File
 	generalURLFile    *os.File
+	allURLsPassedFile *os.File  // File for configs that passed ALL 4 URL tests
 
 	stats             sync.Map
 	sourceStats       sync.Map  // map[string]*SourceStats - stats per subscription source
@@ -834,6 +870,13 @@ func (pt *ProxyTester) setupIncrementalSave() error {
 		return err
 	}
 	pt.generalURLFile = generalURLFile
+
+	// Create file for configs that passed ALL 4 URL tests
+	allURLsPassedFile, err := os.Create(filepath.Join(pt.config.DataDir, "working_url", "all_urls_passed.txt"))
+	if err != nil {
+		return err
+	}
+	pt.allURLsPassedFile = allURLsPassedFile
 
 	log.Println("Incremental save files initialized")
 	return nil
@@ -1493,15 +1536,16 @@ func (pt *ProxyTester) isValidConfig(config *ProxyConfig) bool {
 
 
 
-func (pt *ProxyTester) TestSingleConfig(config *ProxyConfig, batchID int) *TestResultData {
+func (pt *ProxyTester) TestSingleConfig(config *ProxyConfig, batchID int, retryCount int) *TestResultData {
 	startTime := time.Now()
 	var proxyPort int
 	var process *exec.Cmd
 	var configFile string
 
 	result := &TestResultData{
-		Config:  *config,
-		BatchID: &batchID,
+		Config:     *config,
+		BatchID:    &batchID,
+		RetryCount: retryCount,
 	}
 
 	defer func() {
@@ -1557,9 +1601,9 @@ func (pt *ProxyTester) TestSingleConfig(config *ProxyConfig, batchID int) *TestR
 	}
 
 	// Wait for the local socks inbound to be responsive with a short timeout
-	readyBy := time.Now().Add(3 * time.Second)
+	readyBy := time.Now().Add(10 * time.Second)  // Increased from 3s to 10s
 	for !pt.networkTester.isProxyResponsive(proxyPort) && time.Now().Before(readyBy) {
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)  // Increased from 100ms to 200ms
 	}
 
 	if process.ProcessState != nil && process.ProcessState.Exited() {
@@ -1619,7 +1663,7 @@ func (pt *ProxyTester) writeConfigToTempFile(config map[string]interface{}) (str
 }
 
 func (pt *ProxyTester) testConfigSyntax(configFile string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)  // Increased from 3s to 10s
 	defer cancel()
 
 	// Run xray's syntax test; capture combined output for better diagnostics
@@ -1693,6 +1737,18 @@ func (pt *ProxyTester) saveConfigImmediately(result *TestResultData) {
 		configURL = pt.addConfigName(configURL, fmt.Sprintf("🔥%d🔥", counter))
 		fmt.Fprintf(pt.generalURLFile, "%s\n", configURL)
 		pt.generalURLFile.Sync()
+	}
+
+	// Save to special file for configs that passed ALL 4 URL tests
+	if pt.allURLsPassedFile != nil && result.ExternalIP == "All URLs passed" {
+		configURL := pt.createConfigURL(result)
+		// Add special emoji for all-URLs-passed configs
+		configURL = pt.addConfigName(configURL, fmt.Sprintf("⭐%d⭐", counter))
+		fmt.Fprintf(pt.allURLsPassedFile, "%s\n", configURL)
+		pt.allURLsPassedFile.Sync()
+
+		log.Printf("🌟 SAVED TO ALL-URLS-PASSED: %s://%s:%d",
+			result.Config.Protocol, result.Config.Server, result.Config.Port)
 	}
 }
 
@@ -2071,7 +2127,7 @@ func (pt *ProxyTester) TestConfigs(configs []ProxyConfig, batchID int) []*TestRe
 		go func() {
 			defer wg.Done()
 			for config := range configChan {
-				result := pt.TestSingleConfig(&config, batchID)
+				result := pt.TestSingleConfig(&config, batchID, 0)  // First attempt (retryCount = 0)
 				pt.updateStats(result)
 				resultChan <- result
 			}
@@ -2122,7 +2178,8 @@ func (pt *ProxyTester) RunTests(configs []ProxyConfig) []*TestResultData {
 
 	totalConfigs := len(configs)
 	log.Printf("Starting comprehensive proxy testing for %d configurations", totalConfigs)
-	log.Printf("Settings: %d workers, %v timeout, batch size: %d", pt.config.MaxWorkers, pt.config.Timeout, pt.config.BatchSize)
+	log.Printf("Settings: %d workers, %v timeout, batch size: %d, max retries: %d",
+		pt.config.MaxWorkers, pt.config.Timeout, pt.config.BatchSize, pt.config.MaxRetries)
 
 	var allResults []*TestResultData
 
@@ -2155,8 +2212,222 @@ func (pt *ProxyTester) RunTests(configs []ProxyConfig) []*TestResultData {
 		}
 	}
 
+	// Retry failed configs
+	if pt.config.MaxRetries > 0 {
+		allResults = pt.RetryFailedConfigs(allResults)
+	}
+
 	pt.printFinalSummary(allResults)
 	return allResults
+}
+
+func (pt *ProxyTester) RetryFailedConfigs(allResults []*TestResultData) []*TestResultData {
+	// Collect failed configs
+	var failedConfigs []ProxyConfig
+	var failedResults []*TestResultData
+
+	for _, result := range allResults {
+		if result.Result != ResultSuccess {
+			failedConfigs = append(failedConfigs, result.Config)
+			failedResults = append(failedResults, result)
+		}
+	}
+
+	if len(failedConfigs) == 0 {
+		log.Println("🎉 All configurations passed! No retries needed.")
+		return allResults
+	}
+
+	log.Printf("🔄 Starting retry process for %d failed configurations (max %d retries)...",
+		len(failedConfigs), pt.config.MaxRetries)
+
+	// Group failed configs by failure reason for reporting
+	failureReasons := make(map[TestResult][]*TestResultData)
+	for _, result := range failedResults {
+		failureReasons[result.Result] = append(failureReasons[result.Result], result)
+	}
+
+	// Print failure summary before retry
+	log.Println("\n📊 Failure Summary Before Retry:")
+	for reason, results := range failureReasons {
+		log.Printf("  %s: %d configs", reason, len(results))
+	}
+
+	// Perform retries
+	for retryAttempt := 1; retryAttempt <= pt.config.MaxRetries; retryAttempt++ {
+		log.Printf("\n🔄 Retry attempt %d/%d for %d failed configs...",
+			retryAttempt, pt.config.MaxRetries, len(failedConfigs))
+
+		var retryResults []*TestResultData
+		successCount := 0
+
+		// Test failed configs with smaller batch size for retries
+		retryBatchSize := pt.config.BatchSize / 2  // Smaller batches for retries
+		if retryBatchSize < 50 {
+			retryBatchSize = 50
+		}
+
+		for i := 0; i < len(failedConfigs); i += retryBatchSize {
+			end := i + retryBatchSize
+			if end > len(failedConfigs) {
+				end = len(failedConfigs)
+			}
+
+			batch := failedConfigs[i:end]
+			batchResults := pt.TestRetryConfigs(batch, retryAttempt)
+			retryResults = append(retryResults, batchResults...)
+
+			for _, result := range batchResults {
+				if result.Result == ResultSuccess {
+					successCount++
+				}
+			}
+
+			// Small delay between retry batches
+			time.Sleep(1 * time.Second)
+		}
+
+		log.Printf("Retry attempt %d completed: %d/%d successful (%.1f%%)",
+			retryAttempt, successCount, len(failedConfigs),
+			float64(successCount)/float64(len(failedConfigs))*100)
+
+		// Update allResults with successful retries
+		for _, retryResult := range retryResults {
+			if retryResult.Result == ResultSuccess {
+				// Find and replace the failed result with successful retry
+				for i, originalResult := range allResults {
+					if originalResult.Config.Server == retryResult.Config.Server &&
+					   originalResult.Config.Port == retryResult.Config.Port &&
+					   originalResult.Result != ResultSuccess {
+						allResults[i] = retryResult
+						break
+					}
+				}
+			}
+		}
+
+		// Prepare for next retry attempt if needed
+		if retryAttempt < pt.config.MaxRetries {
+			var stillFailedConfigs []ProxyConfig
+			for _, result := range retryResults {
+				if result.Result != ResultSuccess {
+					stillFailedConfigs = append(stillFailedConfigs, result.Config)
+				}
+			}
+			failedConfigs = stillFailedConfigs
+
+			if len(failedConfigs) > 0 {
+				log.Printf("⏸️  Resting 3 seconds before next retry attempt...")
+				time.Sleep(3 * time.Second)
+			} else {
+				break
+			}
+		}
+	}
+
+	// Final failure report
+	pt.printRetryFailureReport(allResults, failureReasons)
+
+	return allResults
+}
+
+func (pt *ProxyTester) TestRetryConfigs(configs []ProxyConfig, retryAttempt int) []*TestResultData {
+	if len(configs) == 0 {
+		return nil
+	}
+
+	maxWorkers := pt.config.MaxWorkers / 2  // Fewer workers for retries
+	if maxWorkers < 50 {
+		maxWorkers = 50
+	}
+	if len(configs) < maxWorkers {
+		maxWorkers = len(configs)
+	}
+
+	configChan := make(chan ProxyConfig, len(configs))
+	resultChan := make(chan *TestResultData, len(configs))
+
+	var wg sync.WaitGroup
+	for i := 0; i < maxWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for config := range configChan {
+				result := pt.TestSingleConfig(&config, -1, retryAttempt)  // Use -1 for retry batch ID
+				pt.updateStats(result)
+				resultChan <- result
+			}
+		}()
+	}
+
+	for _, config := range configs {
+		configChan <- config
+	}
+	close(configChan)
+
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	var results []*TestResultData
+	for result := range resultChan {
+		results = append(results, result)
+	}
+
+	return results
+}
+
+func (pt *ProxyTester) printRetryFailureReport(allResults []*TestResultData, originalFailures map[TestResult][]*TestResultData) {
+	log.Println("\n📊 Final Failure Report After Retries:")
+
+	// Count final failures by reason
+	finalFailures := make(map[TestResult]int)
+	totalRetried := 0
+	successfullyRecovered := 0
+
+	for _, result := range allResults {
+		if result.RetryCount > 0 {
+			totalRetried++
+			if result.Result == ResultSuccess {
+				successfullyRecovered++
+			} else {
+				finalFailures[result.Result]++
+			}
+		}
+	}
+
+	log.Printf("  Total configs retried: %d", totalRetried)
+	log.Printf("  Successfully recovered: %d (%.1f%%)",
+		successfullyRecovered, float64(successfullyRecovered)/float64(totalRetried)*100)
+
+	if len(finalFailures) > 0 {
+		log.Println("\n  Remaining failures after retries:")
+		for reason, count := range finalFailures {
+			log.Printf("    %s: %d configs", reason, count)
+		}
+	}
+
+	// Show recovery by original failure reason
+	log.Println("\n📈 Recovery Rate by Original Failure Reason:")
+	for originalReason, results := range originalFailures {
+		recovered := 0
+		for _, result := range results {
+			// Check if this config was eventually recovered
+			for _, finalResult := range allResults {
+				if finalResult.Config.Server == result.Config.Server &&
+				   finalResult.Config.Port == result.Config.Port &&
+				   finalResult.Result == ResultSuccess {
+					recovered++
+					break
+				}
+			}
+		}
+
+		recoveryRate := float64(recovered) / float64(len(results)) * 100
+		log.Printf("  %s: %d/%d recovered (%.1f%%)",
+			originalReason, recovered, len(results), recoveryRate)
+	}
 }
 
 func (pt *ProxyTester) saveResults(results []*TestResultData) {
@@ -2365,9 +2636,9 @@ func (pt *ProxyTester) printFinalSummary(results []*TestResultData) {
 
 	// Display per-subscription statistics
 	log.Println("\nSubscription Source Breakdown:")
-	log.Println(strings.Repeat("-", 100))
-	log.Printf("%-60s | %8s | %8s | %8s | %8s", "Subscription URL", "Total", "Success", "Failed", "Success%")
-	log.Println(strings.Repeat("-", 100))
+	log.Println(strings.Repeat("-", 150))
+	log.Printf("%-120s | %8s | %8s | %8s | %8s", "Subscription URL", "Total", "Success", "Failed", "Success%")
+	log.Println(strings.Repeat("-", 150))
 
 	var totalSubConfigs, totalSubSuccess, totalSubFailed int64
 	pt.sourceStats.Range(func(key, value interface{}) bool {
@@ -2382,27 +2653,22 @@ func (pt *ProxyTester) printFinalSummary(results []*TestResultData) {
 		totalSubSuccess += success
 		totalSubFailed += failed
 
-		shortSource := source
-		if len(shortSource) > 60 {
-			shortSource = shortSource[:57] + "..."
-		}
-
 		successPct := float64(0)
 		if total > 0 {
 			successPct = float64(success) / float64(total) * 100
 		}
 
-		log.Printf("%-60s | %8d | %8d | %8d | %7.1f%%",
-			shortSource, total, success, failed, successPct)
+		log.Printf("%-120s | %8d | %8d | %8d | %7.1f%%",
+			source, total, success, failed, successPct)
 		return true
 	})
 
-	log.Println(strings.Repeat("-", 100))
+	log.Println(strings.Repeat("-", 150))
 	overallSuccessPct := float64(0)
 	if totalSubConfigs > 0 {
 		overallSuccessPct = float64(totalSubSuccess) / float64(totalSubConfigs) * 100
 	}
-	log.Printf("%-60s | %8d | %8d | %8d | %7.1f%%",
+	log.Printf("%-120s | %8d | %8d | %8d | %7.1f%%",
 		"TOTAL", totalSubConfigs, totalSubSuccess, totalSubFailed, overallSuccessPct)
 
 	if len(successTimes) > 0 {
@@ -2446,6 +2712,9 @@ func (pt *ProxyTester) Cleanup() {
 	}
 	if pt.generalURLFile != nil {
 		pt.generalURLFile.Close()
+	}
+	if pt.allURLsPassedFile != nil {
+		pt.allURLsPassedFile.Close()
 	}
 
 	pt.processManager.Cleanup()
