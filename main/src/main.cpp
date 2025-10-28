@@ -125,23 +125,19 @@ int main(int argc, char *argv[]) {
 
     // Display detailed statistics per subscription
     qDebug() << "\n=== Subscription Statistics ===";
-    qDebug() << QString("%-60s | %8s | %8s | %8s").arg("Subscription URL", "Total", "Unique", "Duplicates");
-    qDebug() << QString("-").repeated(100);
+    qDebug() << QString("%-120s | %8s | %8s | %8s").arg("Subscription URL", "Total", "Unique", "Duplicates");
+    qDebug() << QString("-").repeated(160);
 
     for (const auto &stat : subscriptionStats) {
-        QString shortUrl = stat.url;
-        if (shortUrl.length() > 60) {
-            shortUrl = shortUrl.left(57) + "...";
-        }
-        qDebug() << QString("%-60s | %8d | %8d | %8d")
-            .arg(shortUrl)
+        qDebug() << QString("%-120s | %8d | %8d | %8d")
+            .arg(stat.url)
             .arg(stat.totalConfigs)
             .arg(stat.uniqueConfigs)
             .arg(stat.duplicates);
     }
 
-    qDebug() << QString("-").repeated(100);
-    qDebug() << QString("%-60s | %8d | %8d | %8d")
+    qDebug() << QString("-").repeated(160);
+    qDebug() << QString("%-120s | %8d | %8d | %8d")
         .arg("TOTAL")
         .arg(subscriptionStats.isEmpty() ? 0 :
              std::accumulate(subscriptionStats.begin(), subscriptionStats.end(), 0,
