@@ -92,7 +92,7 @@ func NewDefaultConfig() *Config {
 		LogDir:          logDir,
 		StartPort:       getEnvIntOrDefault("PROXY_START_PORT", 10000),
 		EndPort:         getEnvIntOrDefault("PROXY_END_PORT", 60000),
-		MaxRetries:      getEnvIntOrDefault("PROXY_MAX_RETRIES", 2),
+		MaxRetries:      getEnvIntOrDefault("PROXY_MAX_RETRIES", 0),
 	}
 }
 
