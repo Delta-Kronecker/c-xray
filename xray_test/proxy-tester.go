@@ -282,13 +282,6 @@ func NewNetworkTester(timeout time.Duration) *NetworkTester {
 		timeout: timeout,
 		testURLs: []string{
 			"http://connectivitycheck.gstatic.com/generate_204",
-			"http://connectivitycheck.gstatic.com/generate_204",
-			"http://connectivitycheck.gstatic.com/generate_204",
-			"http://connectivitycheck.gstatic.com/generate_204",
-			"http://connectivitycheck.gstatic.com/generate_204",
-			"http://connectivitycheck.gstatic.com/generate_204",
-			"http://connectivitycheck.gstatic.com/generate_204",
-			"http://connectivitycheck.gstatic.com/generate_204",
 		},
 		client: &http.Client{Timeout: timeout},
 	}
