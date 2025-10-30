@@ -83,9 +83,9 @@ func NewDefaultConfig() *Config {
 
 	return &Config{
 		XrayPath:        getEnvOrDefault("XRAY_PATH", ""),
-		MaxWorkers:      getEnvIntOrDefault("PROXY_MAX_WORKERS", 300),
+		MaxWorkers:      getEnvIntOrDefault("PROXY_MAX_WORKERS", 100),
 		Timeout:         time.Duration(getEnvIntOrDefault("PROXY_TIMEOUT", 10)) * time.Second,
-		BatchSize:       getEnvIntOrDefault("PROXY_BATCH_SIZE", 300),
+		BatchSize:       getEnvIntOrDefault("PROXY_BATCH_SIZE", 100),
 		IncrementalSave: getEnvBoolOrDefault("PROXY_INCREMENTAL_SAVE", true),
 		DataDir:         dataDir,
 		ConfigDir:       configDir,
@@ -285,6 +285,14 @@ func NewNetworkTester(timeout time.Duration) *NetworkTester {
 			"http://cp.cloudflare.com",
 			"http://detectportal.firefox.com",
 			"http://connectivitycheck.gstatic.com/generate_204",
+			"http://www.gstatic.com/generate_204",
+			"http://cp.cloudflare.com",
+			"http://detectportal.firefox.com",
+			"http://connectivitycheck.gstatic.com/generate_204",
+			"http://www.gstatic.com/generate_204",
+			"http://cp.cloudflare.com",
+			"http://detectportal.firefox.com",
+			"http://connectivitycheck.gstatic.com/generate_204",
 		},
 		client: &http.Client{Timeout: timeout},
 	}
@@ -305,7 +313,7 @@ func (nt *NetworkTester) TestProxyConnection(proxyPort int) (bool, string, float
 		return false, "", time.Since(startTime).Seconds()
 	}
 
-	testCount := 4  // Test all 4 URLs
+	testCount := 12  // Test all 4 URLs
 	if len(nt.testURLs) < testCount {
 		testCount = len(nt.testURLs)
 	}
