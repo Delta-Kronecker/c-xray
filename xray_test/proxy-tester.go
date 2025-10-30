@@ -83,9 +83,9 @@ func NewDefaultConfig() *Config {
 
 	return &Config{
 		XrayPath:        getEnvOrDefault("XRAY_PATH", ""),
-		MaxWorkers:      getEnvIntOrDefault("PROXY_MAX_WORKERS", 50),
+		MaxWorkers:      getEnvIntOrDefault("PROXY_MAX_WORKERS", 300),
 		Timeout:         time.Duration(getEnvIntOrDefault("PROXY_TIMEOUT", 10)) * time.Second,
-		BatchSize:       getEnvIntOrDefault("PROXY_BATCH_SIZE", 100),
+		BatchSize:       getEnvIntOrDefault("PROXY_BATCH_SIZE", 300),
 		IncrementalSave: getEnvBoolOrDefault("PROXY_INCREMENTAL_SAVE", true),
 		DataDir:         dataDir,
 		ConfigDir:       configDir,
@@ -281,7 +281,7 @@ func NewNetworkTester(timeout time.Duration) *NetworkTester {
 	return &NetworkTester{
 		timeout: timeout,
 		testURLs: []string{
-			"http://cp.cloudflare.com",
+			"http://connectivitycheck.gstatic.com/generate_204",
 		},
 		client: &http.Client{Timeout: timeout},
 	}
@@ -302,7 +302,7 @@ func (nt *NetworkTester) TestProxyConnection(proxyPort int) (bool, string, float
 		return false, "", time.Since(startTime).Seconds()
 	}
 
-	testCount := 1  // Test all 4 URLs
+	testCount := 4  // Test all 4 URLs
 	if len(nt.testURLs) < testCount {
 		testCount = len(nt.testURLs)
 	}
@@ -313,31 +313,18 @@ func (nt *NetworkTester) TestProxyConnection(proxyPort int) (bool, string, float
 		shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
 	})
 
-	// Test all 4 URLs - at least 1 must succeed (changed from ALL must succeed)
-	successCount := 0
-	var responseTimes []float64
+	// Test single URL
+	testURL := nt.testURLs[0]
+	success, _, responseTime := nt.singleTest(proxyPort, testURL)
 
-	for i, testURL := range shuffled {
-		success, _, responseTime := nt.singleTest(proxyPort, testURL)
-		if success {
-			successCount++
-			responseTimes = append(responseTimes, responseTime)
-		}
-		log.Printf("  URL %d/4 (%s): %s", i+1, testURL, map[bool]string{true: "✅ SUCCESS", false: "❌ FAILED"}[success])
+	// Only log batch summary, not individual attempts
+	// This will be logged at batch level
+
+	if success {
+		return true, "Connectivity test passed", responseTime
 	}
 
-	// Consider successful if AT LEAST 1 URL passes (changed from ALL 4)
-	if successCount >= 1 {
-		// Return average response time of successful URLs
-		var avgTime float64
-		for _, rt := range responseTimes {
-			avgTime += rt
-		}
-		avgTime = avgTime / float64(len(responseTimes))
-		return true, fmt.Sprintf("%d/4 URLs passed", successCount), avgTime
-	}
-
-	return false, fmt.Sprintf("0/4 URLs passed", successCount), time.Since(startTime).Seconds()
+	return false, "Connectivity test failed", time.Since(startTime).Seconds()
 }
 
 func (nt *NetworkTester) isProxyResponsive(port int) bool {
@@ -764,8 +751,7 @@ type ProxyTester struct {
 	urlFiles          map[ProxyProtocol]*os.File
 	generalJSONFile   *os.File
 	generalURLFile    *os.File
-	allURLsPassedFile *os.File  // File for configs that passed ALL 4 URL tests
-	allURLs4of4File  *os.File  // File for configs that passed 4/4 URL tests
+	allURLsPassedFile *os.File  // File for configs that passed connectivity test
 
 	stats             sync.Map
 	sourceStats       sync.Map  // map[string]*SourceStats - stats per subscription source
@@ -869,19 +855,12 @@ func (pt *ProxyTester) setupIncrementalSave() error {
 	}
 	pt.generalURLFile = generalURLFile
 
-	// Create file for configs that passed ALL 4 URL tests
-	allURLsPassedFile, err := os.Create(filepath.Join(pt.config.DataDir, "working_url", "all_urls_passed.txt"))
+	// Create file for configs that passed connectivity test
+	allURLsPassedFile, err := os.Create(filepath.Join(pt.config.DataDir, "working_url", "connectivity_passed.txt"))
 	if err != nil {
 		return err
 	}
 	pt.allURLsPassedFile = allURLsPassedFile
-
-	// Create file for configs that passed ALL 4 URL tests (4/4)
-	allURLs4of4File, err := os.Create(filepath.Join(pt.config.DataDir, "working_url", "all_urls_4of4.txt"))
-	if err != nil {
-		return err
-	}
-	pt.allURLs4of4File = allURLs4of4File
 
 	log.Println("Incremental save files initialized")
 	return nil
@@ -1630,8 +1609,6 @@ func (pt *ProxyTester) TestSingleConfig(config *ProxyConfig, batchID int, retryC
 		if pt.config.IncrementalSave {
 			pt.saveConfigImmediately(result)
 		}
-
-		log.Printf("SUCCESS: %s://%s:%d (%.3fs)", config.Protocol, config.Server, config.Port, responseTime)
 	} else {
 		result.Result = ResultNetworkError
 		result.ErrorMessage = "Network test failed"
@@ -1744,28 +1721,13 @@ func (pt *ProxyTester) saveConfigImmediately(result *TestResultData) {
 		pt.generalURLFile.Sync()
 	}
 
-	// Save to special file for configs that passed ALL 4 URL tests
-	if pt.allURLsPassedFile != nil && strings.Contains(result.ExternalIP, "4/4 URLs passed") {
+	// Save to special file for configs that passed connectivity test
+	if pt.allURLsPassedFile != nil && strings.Contains(result.ExternalIP, "Connectivity test passed") {
 		configURL := pt.createConfigURL(result)
-		// Add special emoji for all-URLs-passed configs
+		// Add special emoji for connectivity-passed configs
 		configURL = pt.addConfigName(configURL, fmt.Sprintf("⭐%d⭐", counter))
 		fmt.Fprintf(pt.allURLsPassedFile, "%s\n", configURL)
 		pt.allURLsPassedFile.Sync()
-
-		log.Printf("🌟 SAVED TO ALL-URLS-PASSED: %s://%s:%d",
-			result.Config.Protocol, result.Config.Server, result.Config.Port)
-	}
-
-	// Save to special file for configs that passed 4/4 URL tests
-	if pt.allURLs4of4File != nil && strings.Contains(result.ExternalIP, "4/4 URLs passed") {
-		configURL := pt.createConfigURL(result)
-		// Add special emoji for 4/4-URLs-passed configs
-		configURL = pt.addConfigName(configURL, fmt.Sprintf("🔥%d🔥", counter))
-		fmt.Fprintf(pt.allURLs4of4File, "%s\n", configURL)
-		pt.allURLs4of4File.Sync()
-
-		log.Printf("🔥 SAVED TO ALL-URLS-4OF4: %s://%s:%d",
-			result.Config.Protocol, result.Config.Server, result.Config.Port)
 	}
 }
 
@@ -2171,6 +2133,7 @@ func (pt *ProxyTester) TestConfigs(configs []ProxyConfig, batchID int) []*TestRe
 		}
 	}
 
+	// Log batch summary instead of individual attempts
 	log.Printf("Batch %d completed: %d/%d successful (%.1f%%)",
 		batchID, successCount, len(configs), float64(successCount)/float64(len(configs))*100)
 
@@ -2533,57 +2496,21 @@ func (pt *ProxyTester) cleanupBetweenBatches() {
 	log.Println(strings.Repeat("-", 70))
 	log.Println(" Cleaning up resources before next batch...")
 
-	// Count tracked processes before cleanup
-	trackedProcessesBefore := pt.processManager.GetProcessCount()
-	systemProcessesBefore := pt.countXrayCoreProcesses()
-	log.Printf("   Tracked processes: %d", trackedProcessesBefore)
-	log.Printf("   System xray-core processes: %d", systemProcessesBefore)
-
 	// Stop all tracked xray-core processes
-	log.Println("   Force killing all tracked xray processes...")
 	killedCount := pt.processManager.ForceCleanupAll()
 
 	// Wait for processes to be reaped and fully terminate
-	log.Println("  ⏳ Waiting for processes to terminate...")
 	time.Sleep(2 * time.Second)
 
-	trackedProcessesAfter := pt.processManager.GetProcessCount()
 	systemProcessesAfter := pt.countXrayCoreProcesses()
 
-	log.Printf("   Tracked processes killed: %d", killedCount)
-	log.Printf("   Tracked processes remaining: %d", trackedProcessesAfter)
+	log.Printf("   Process cleanup: %d tracked killed, %d system processes remaining",
+		killedCount, systemProcessesAfter)
 
-	if systemProcessesAfter == 0 {
-		log.Printf("   System xray-core processes cleaned: %d", systemProcessesBefore)
-	} else {
-		log.Printf("    System xray-core processes still running: %d", systemProcessesAfter)
-	}
-
-	// Release all used ports
-	log.Println("   Releasing all used ports...")
-	portsBefore := 0
-	pt.portManager.usedPorts.Range(func(key, value interface{}) bool {
-		portsBefore++
-		return true
-	})
-	log.Printf("   Used ports before cleanup: %d", portsBefore)
-
+	// Release all used ports and force garbage collection
 	pt.portManager.cleanup()
-
-	portsAfter := 0
-	pt.portManager.usedPorts.Range(func(key, value interface{}) bool {
-		portsAfter++
-		return true
-	})
-	log.Printf("   Used ports released: %d", portsBefore-portsAfter)
-	log.Printf("   Used ports remaining: %d", portsAfter)
-
-	// Force garbage collection to free memory
 	runtime.GC()
-	log.Println("    Garbage collection completed")
-
-	log.Println("   Cleanup completed successfully!")
-	log.Println(strings.Repeat("-", 70))
+	log.Printf("   Batch cleanup completed")
 }
 
 func (pt *ProxyTester) reportSystemStatus(batchID int) {
@@ -2732,9 +2659,6 @@ func (pt *ProxyTester) Cleanup() {
 	}
 	if pt.allURLsPassedFile != nil {
 		pt.allURLsPassedFile.Close()
-	}
-	if pt.allURLs4of4File != nil {
-		pt.allURLs4of4File.Close()
 	}
 
 	pt.processManager.Cleanup()
