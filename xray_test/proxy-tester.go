@@ -281,13 +281,13 @@ func NewNetworkTester(timeout time.Duration) *NetworkTester {
 	return &NetworkTester{
 		timeout: timeout,
 		testURLs: []string{
-			"http://www.gstatic.com/generate_204",
-			"http://cp.cloudflare.com",
-			"http://detectportal.firefox.com",
 			"http://connectivitycheck.gstatic.com/generate_204",
-			"http://www.gstatic.com/generate_204",
-			"http://cp.cloudflare.com",
-			"http://detectportal.firefox.com",
+			"http://connectivitycheck.gstatic.com/generate_204",
+			"http://connectivitycheck.gstatic.com/generate_204",
+			"http://connectivitycheck.gstatic.com/generate_204",
+			"http://connectivitycheck.gstatic.com/generate_204",
+			"http://connectivitycheck.gstatic.com/generate_204",
+			"http://connectivitycheck.gstatic.com/generate_204",
 			"http://connectivitycheck.gstatic.com/generate_204",
 		},
 		client: &http.Client{Timeout: timeout},
@@ -334,7 +334,7 @@ func (nt *NetworkTester) TestProxyConnection(proxyPort int) (bool, string, float
 	}
 
 	// Consider successful if AT LEAST 1 URL passes (changed from ALL 4)
-	if successCount >= 4 {
+	if successCount >= 1 {
 		// Return average response time of successful URLs
 		var avgTime float64
 		for _, rt := range responseTimes {
