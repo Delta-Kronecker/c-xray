@@ -334,7 +334,7 @@ func (nt *NetworkTester) TestProxyConnection(proxyPort int) (bool, string, float
 	}
 
 	// Consider successful if AT LEAST 1 URL passes (changed from ALL 4)
-	if successCount >= 1 {
+	if successCount >= 2 {
 		// Return average response time of successful URLs
 		var avgTime float64
 		for _, rt := range responseTimes {
