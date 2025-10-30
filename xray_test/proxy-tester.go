@@ -278,14 +278,14 @@ func NewNetworkTester(timeout time.Duration) *NetworkTester {
 	return &NetworkTester{
 		timeout: timeout,
 		testURLs: []string{
-			"http://connectivitycheck.gstatic.com/generate_204",
-			"http://connectivitycheck.gstatic.com/generate_204",
-			"http://connectivitycheck.gstatic.com/generate_204",
-			"http://connectivitycheck.gstatic.com/generate_204",
-			"http://connectivitycheck.gstatic.com/generate_204",
-			"http://connectivitycheck.gstatic.com/generate_204",
-			"http://connectivitycheck.gstatic.com/generate_204",
-			"http://connectivitycheck.gstatic.com/generate_204",
+			"http://httpbin.org/ip",
+			"http://icanhazip.com",
+			"http://ifconfig.me/ip",
+			"http://api.ipify.org",
+			"http://ipinfo.io/ip",
+			"http://checkip.amazonaws.com",
+			"https://httpbin.org/ip",
+			"https://icanhazip.com",
 		},
 		client: &http.Client{Timeout: timeout},
 	}
@@ -306,7 +306,7 @@ func (nt *NetworkTester) TestProxyConnection(proxyPort int) (bool, string, float
 		return false, "", time.Since(startTime).Seconds()
 	}
 
-	testCount := 4
+	testCount := 8
 	if len(nt.testURLs) < testCount {
 		testCount = len(nt.testURLs)
 	}
