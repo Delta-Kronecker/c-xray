@@ -41,6 +41,19 @@ public:
     QJsonObject ToJson() override;
 };
 
+class ShadowSocksRBean : public ProxyBean {
+public:
+    QString password;
+    QString method;
+    QString protocol;
+    QString obfs;
+    QString obfs_param;
+    QString protocol_param;
+
+    bool TryParseLink(const QString &link) override;
+    QJsonObject ToJson() override;
+};
+
 class TrojanVLESSBean : public ProxyBean {
 public:
     QString password;
