@@ -107,12 +107,8 @@ int main(int argc, char *argv[]) {
 
     // Save unique configs to files
     for (const auto &bean : uniqueConfigs) {
-        // Add emoji to the config name
-        if (bean->name.isEmpty()) {
-            bean->name = "🔥";
-        } else {
-            bean->name.prepend("🔥 ");
-        }
+        // Set the config name to the emoji
+        bean->name = "🔥";
 
         auto json = bean->ToJson();
         auto jsonStr = QJsonObject2QString(json, false);
