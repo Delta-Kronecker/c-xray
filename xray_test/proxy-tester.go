@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/md5"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -57,9 +58,10 @@ const (
 	ProtocolTUIC          ProxyProtocol = "tuic"
 )
 
-var AllProtocols = []ProxyProtocol{
-	ProtocolShadowsocks, ProtocolShadowsocksR, ProtocolVMess, ProtocolVLESS,
-	ProtocolTrojan, ProtocolHysteria, ProtocolHysteria2, ProtocolTUIC,
+type GeoIPInfo struct {
+	CountryCode string `json:"country_code"`
+	CountryName string `json:"country_name"`
+	CountryFlag string `json:"country_flag"`
 }
 
 type Config struct {
@@ -82,9 +84,9 @@ func NewDefaultConfig() *Config {
 
 	return &Config{
 		XrayPath:        getEnvOrDefault("XRAY_PATH", ""),
-		MaxWorkers:      getEnvIntOrDefault("PROXY_MAX_WORKERS", 400),
+		MaxWorkers:      getEnvIntOrDefault("PROXY_MAX_WORKERS", 200),
 		Timeout:         time.Duration(getEnvIntOrDefault("PROXY_TIMEOUT", 5)) * time.Second,
-		BatchSize:       getEnvIntOrDefault("PROXY_BATCH_SIZE", 600),
+		BatchSize:       getEnvIntOrDefault("PROXY_BATCH_SIZE", 400),
 		IncrementalSave: getEnvBoolOrDefault("PROXY_INCREMENTAL_SAVE", true),
 		DataDir:         dataDir,
 		ConfigDir:       configDir,
@@ -124,7 +126,6 @@ type ProxyConfig struct {
 	Server   string        `json:"server"`
 	Port     int           `json:"port"`
 	Remarks  string        `json:"remarks"`
-	Source   string        `json:"source,omitempty"`
 
 	Method   string `json:"method,omitempty"`
 	Password string `json:"password,omitempty"`
@@ -167,6 +168,9 @@ type TestResultData struct {
 	ResponseTime *float64    `json:"response_time,omitempty"`
 	ErrorMessage string      `json:"error_message,omitempty"`
 	ExternalIP   string      `json:"external_ip,omitempty"`
+	CountryCode  string      `json:"country_code,omitempty"`
+	CountryName  string      `json:"country_name,omitempty"`
+	CountryFlag  string      `json:"country_flag,omitempty"`
 	ProxyPort    *int        `json:"proxy_port,omitempty"`
 	BatchID      *int        `json:"batch_id,omitempty"`
 }
@@ -278,20 +282,176 @@ func NewNetworkTester(timeout time.Duration) *NetworkTester {
 	return &NetworkTester{
 		timeout: timeout,
 		testURLs: []string{
-			"http://connectivitycheck.gstatic.com/generate_204",
-			"http://www.gstatic.com/generate_204",
-			"http://cp.cloudflare.com",
-			"http://detectportal.firefox.com",
-			"http://www.msftconnecttest.com/connecttest.txt",
+			"http://httpbin.org/ip",
+			"http://icanhazip.com",
+			"http://ifconfig.me/ip",
+			"http://api.ipify.org",
+			"http://ipinfo.io/ip",
+			"http://checkip.amazonaws.com",
+			"https://httpbin.org/ip",
+			"https://icanhazip.com",
 		},
 		client: &http.Client{Timeout: timeout},
 	}
 }
 
+// Provider 1: ip-api.com
+func getGeoInfoFromIPAPI(ip string, client *http.Client) (*GeoIPInfo, error) {
+	apiURL := fmt.Sprintf("http://ip-api.com/json/%s?fields=status,message,country,countryCode", ip)
+	resp, err := client.Get(apiURL)
+	if err != nil {
+		return nil, fmt.Errorf("ip-api.com request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Status      string `json:"status"`
+		Message     string `json:"message"`
+		Country     string `json:"country"`
+		CountryCode string `json:"countryCode"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("ip-api.com JSON decode failed: %w", err)
+	}
+
+	if result.Status != "success" {
+		return nil, fmt.Errorf("ip-api.com lookup failed: %s", result.Message)
+	}
+
+	return &GeoIPInfo{
+		CountryCode: result.CountryCode,
+		CountryName: result.Country,
+		CountryFlag: countryCodeToFlag(result.CountryCode),
+	}, nil
+}
+
+// Provider 2: ipwho.is
+func getGeoInfoFromIPWho(ip string, client *http.Client) (*GeoIPInfo, error) {
+	apiURL := fmt.Sprintf("http://ipwho.is/%s", ip)
+	resp, err := client.Get(apiURL)
+	if err != nil {
+		return nil, fmt.Errorf("ipwho.is request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Success     bool   `json:"success"`
+		Message     string `json:"message"`
+		Country     string `json:"country"`
+		CountryCode string `json:"country_code"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("ipwho.is JSON decode failed: %w", err)
+	}
+
+	if !result.Success {
+		return nil, fmt.Errorf("ipwho.is lookup failed: %s", result.Message)
+	}
+
+	return &GeoIPInfo{
+		CountryCode: result.CountryCode,
+		CountryName: result.Country,
+		CountryFlag: countryCodeToFlag(result.CountryCode),
+	}, nil
+}
+
+// Provider 3: freegeoip.app
+func getGeoInfoFromFreeGeoIP(ip string, client *http.Client) (*GeoIPInfo, error) {
+	apiURL := fmt.Sprintf("https://freegeoip.app/json/%s", ip)
+	resp, err := client.Get(apiURL)
+	if err != nil {
+		return nil, fmt.Errorf("freegeoip.app request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		CountryCode string `json:"country_code"`
+		CountryName string `json:"country_name"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("freegeoip.app JSON decode failed: %w", err)
+	}
+
+	if result.CountryCode == "" {
+		return nil, fmt.Errorf("freegeoip.app lookup failed: empty country code")
+	}
+
+	return &GeoIPInfo{
+		CountryCode: result.CountryCode,
+		CountryName: result.CountryName,
+		CountryFlag: countryCodeToFlag(result.CountryCode),
+	}, nil
+}
+
+// Provider 4: ipinfo.io
+func getGeoInfoFromIPInfo(ip string, client *http.Client) (*GeoIPInfo, error) {
+	apiURL := fmt.Sprintf("https://ipinfo.io/%s/json", ip)
+	resp, err := client.Get(apiURL)
+	if err != nil {
+		return nil, fmt.Errorf("ipinfo.io request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Country string `json:"country"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("ipinfo.io JSON decode failed: %w", err)
+	}
+
+	if result.Country == "" {
+		return nil, fmt.Errorf("ipinfo.io lookup failed: empty country code")
+	}
+
+	return &GeoIPInfo{
+		CountryCode: result.Country,
+		CountryName: "", // Name not available in this fallback
+		CountryFlag: countryCodeToFlag(result.Country),
+	}, nil
+}
+
+func (nt *NetworkTester) GetCountryInfo(ip string) (*GeoIPInfo, error) {
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	providers := []func(string, *http.Client) (*GeoIPInfo, error){
+		getGeoInfoFromIPAPI,
+		getGeoInfoFromIPWho,
+		getGeoInfoFromFreeGeoIP,
+		getGeoInfoFromIPInfo,
+	}
+
+	for i, provider := range providers {
+		geoInfo, err := provider(ip, client)
+		if err == nil && geoInfo != nil && geoInfo.CountryCode != "" {
+			return geoInfo, nil
+		}
+		if err != nil {
+			log.Printf("GeoIP provider #%d failed: %v", i+1, err)
+		}
+	}
+
+	return nil, fmt.Errorf("all GeoIP providers failed for IP: %s", ip)
+}
+
+func countryCodeToFlag(countryCode string) string {
+	if len(countryCode) != 2 {
+		return "🌐"
+	}
+	countryCode = strings.ToUpper(countryCode)
+	flag := ""
+	for _, r := range countryCode {
+		flag += string(rune(0x1F1E6 + (r - 'A')))
+	}
+	return flag
+}
+
 func (nt *NetworkTester) TestProxyConnection(proxyPort int) (bool, string, float64) {
 	startTime := time.Now()
 
-	// Wait and poll for the proxy port to be responsive (up to timeout)
 	waitDeadline := time.Now().Add(nt.timeout)
 	for time.Now().Before(waitDeadline) {
 		if nt.isProxyResponsive(proxyPort) {
@@ -303,7 +463,7 @@ func (nt *NetworkTester) TestProxyConnection(proxyPort int) (bool, string, float
 		return false, "", time.Since(startTime).Seconds()
 	}
 
-	testCount := 8
+	testCount := 4
 	if len(nt.testURLs) < testCount {
 		testCount = len(nt.testURLs)
 	}
@@ -633,17 +793,13 @@ func (pm *ProcessManager) KillProcess(pid int) error {
 		return fmt.Errorf("invalid process")
 	}
 
-	// Try to kill the process; spawn Wait() in a goroutine to reap it.
 	if err := cmd.Process.Kill(); err != nil {
-		// If kill fails, still remove registration to avoid blocking cleanup
 		pm.processes.Delete(pid)
 		return fmt.Errorf("failed to kill process %d: %w", pid, err)
 	}
 
-	// Unregister now and call Wait in background to reap
 	pm.processes.Delete(pid)
 	go func(c *exec.Cmd) {
-		// Ensure we call Wait but don't block indefinitely
 		c.Wait()
 	}(cmd)
 
@@ -662,12 +818,10 @@ func (pm *ProcessManager) Cleanup() {
 		return true
 	})
 
-	// Kill all processes
 	for _, pid := range pids {
 		pm.KillProcess(pid)
 	}
 
-	// Give processes a moment to terminate and be reaped
 	time.Sleep(200 * time.Millisecond)
 }
 
@@ -686,7 +840,6 @@ func (pm *ProcessManager) ForceCleanupAll() int {
 
 	var cmdsToKill []*exec.Cmd
 
-	// Collect all processes
 	pm.processes.Range(func(key, value interface{}) bool {
 		if cmd, ok := value.(*exec.Cmd); ok {
 			if cmd.Process != nil {
@@ -697,25 +850,17 @@ func (pm *ProcessManager) ForceCleanupAll() int {
 		return true
 	})
 
-	// Kill all processes
 	for _, cmd := range cmdsToKill {
 		cmd.Process.Kill()
 	}
 
-	// Wait for all processes to be reaped (prevent zombies)
 	for _, cmd := range cmdsToKill {
 		go func(c *exec.Cmd) {
-			c.Wait() // Reap the process
+			c.Wait()
 		}(cmd)
 	}
 
 	return len(cmdsToKill)
-}
-
-type SourceStats struct {
-	TotalConfigs   int64
-	SuccessConfigs int64
-	FailedConfigs  int64
 }
 
 type ProxyTester struct {
@@ -731,10 +876,7 @@ type ProxyTester struct {
 	generalURLFile    *os.File
 
 	stats             sync.Map
-	sourceStats       sync.Map  // map[string]*SourceStats - stats per subscription source
 	resultsMu         sync.Mutex
-	configCounter     int
-	counterMu         sync.Mutex
 }
 
 func NewProxyTester(config *Config) (*ProxyTester, error) {
@@ -804,12 +946,17 @@ func (pt *ProxyTester) setupIncrementalSave() error {
 		ProtocolTUIC:         "tuic",
 	}
 
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+
 	for protocol, name := range protocols {
 		jsonFile, err := os.Create(filepath.Join(pt.config.DataDir, "working_json", fmt.Sprintf("working_%s.txt", name)))
 		if err != nil {
 			return err
 		}
 
+		jsonFile.WriteString(fmt.Sprintf("# Working %s Configurations (JSON Format)\n", strings.ToUpper(name)))
+		jsonFile.WriteString(fmt.Sprintf("# Generated at: %s\n", timestamp))
+		jsonFile.WriteString("# Format: Each line contains one working configuration in JSON\n\n")
 		pt.outputFiles[protocol] = jsonFile
 
 		urlFile, err := os.Create(filepath.Join(pt.config.DataDir, "working_url", fmt.Sprintf("working_%s_urls.txt", name)))
@@ -817,130 +964,34 @@ func (pt *ProxyTester) setupIncrementalSave() error {
 			return err
 		}
 
+		urlFile.WriteString(fmt.Sprintf("# Working %s Configurations (URL Format)\n", strings.ToUpper(name)))
+		urlFile.WriteString(fmt.Sprintf("# Generated at: %s\n", timestamp))
+		urlFile.WriteString("# Format: Each line contains one working configuration as URL\n\n")
 		pt.urlFiles[protocol] = urlFile
 	}
 
-	generalJSONFile, err := os.Create(filepath.Join(pt.config.DataDir, "working_json", "all.txt"))
+	generalJSONFile, err := os.Create(filepath.Join(pt.config.DataDir, "working_json", "working_all_configs.txt"))
 	if err != nil {
 		return err
 	}
+	generalJSONFile.WriteString("# All Working Configurations (JSON Format)\n")
+	generalJSONFile.WriteString(fmt.Sprintf("# Generated at: %s\n", timestamp))
+	generalJSONFile.WriteString("# Format: Each line contains one working configuration in JSON\n")
+	generalJSONFile.WriteString("# Protocols: Shadowsocks, ShadowsocksR, VMess, VLESS, Trojan, Hysteria, Hysteria2, TUIC\n\n")
 	pt.generalJSONFile = generalJSONFile
 
-	generalURLFile, err := os.Create(filepath.Join(pt.config.DataDir, "working_url", "all.txt"))
+	generalURLFile, err := os.Create(filepath.Join(pt.config.DataDir, "working_url", "working_all_urls.txt"))
 	if err != nil {
 		return err
 	}
+	generalURLFile.WriteString("# All Working Configurations (URL Format)\n")
+	generalURLFile.WriteString(fmt.Sprintf("# Generated at: %s\n", timestamp))
+	generalURLFile.WriteString("# Format: Each line contains one working configuration as URL\n")
+	generalURLFile.WriteString("# Protocols: Shadowsocks, ShadowsocksR, VMess, VLESS, Trojan, Hysteria, Hysteria2, TUIC\n\n")
 	pt.generalURLFile = generalURLFile
 
 	log.Println("Incremental save files initialized")
 	return nil
-}
-
-// LoadConfigFromCollectorJSON loads a single config file created by ConfigCollector
-func (pt *ProxyTester) LoadConfigFromCollectorJSON(filePath string) (*ProxyConfig, error) {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	var rawConfig map[string]interface{}
-	if err := json.NewDecoder(file).Decode(&rawConfig); err != nil {
-		return nil, err
-	}
-
-	configType, ok := rawConfig["type"].(string)
-	if !ok {
-		return nil, fmt.Errorf("missing or invalid 'type' field")
-	}
-
-	config := ProxyConfig{
-		Remarks: getString(rawConfig, "name"),
-		Server:  getString(rawConfig, "server"),
-		Port:    getInt(rawConfig, "port"),
-		Source:  getString(rawConfig, "source"),
-	}
-
-	switch configType {
-	case "vmess":
-		config.Protocol = ProtocolVMess
-		config.UUID = getString(rawConfig, "uuid")
-		config.AlterID = getInt(rawConfig, "alterId")
-		config.Cipher = getString(rawConfig, "cipher")
-		config.Network = getStringOrDefault(rawConfig, "network", "tcp")
-		config.TLS = getString(rawConfig, "tls")
-		config.SNI = getString(rawConfig, "sni")
-		config.Host = getString(rawConfig, "host")
-		config.Path = getString(rawConfig, "path")
-
-	case "vless":
-		config.Protocol = ProtocolVLESS
-		config.UUID = getString(rawConfig, "password")
-		config.Flow = getString(rawConfig, "flow")
-		config.Network = getStringOrDefault(rawConfig, "network", "tcp")
-		config.TLS = getString(rawConfig, "security")
-		config.SNI = getString(rawConfig, "sni")
-		config.Host = getString(rawConfig, "host")
-		config.Path = getString(rawConfig, "path")
-		config.Encrypt = "none"
-
-	case "trojan":
-		config.Protocol = ProtocolTrojan
-		config.Password = getString(rawConfig, "password")
-		config.Network = getStringOrDefault(rawConfig, "network", "tcp")
-		config.TLS = getStringOrDefault(rawConfig, "security", "tls")
-		config.SNI = getString(rawConfig, "sni")
-		config.Host = getString(rawConfig, "host")
-		config.Path = getString(rawConfig, "path")
-
-	case "shadowsocks", "ss":
-		config.Protocol = ProtocolShadowsocks
-		config.Method = getString(rawConfig, "method")
-		config.Password = getString(rawConfig, "password")
-		config.Network = "tcp"
-
-	default:
-		return nil, fmt.Errorf("unsupported protocol: %s", configType)
-	}
-
-	if !pt.isValidConfig(&config) {
-		return nil, fmt.Errorf("invalid config")
-	}
-
-	return &config, nil
-}
-
-// Helper functions for JSON parsing
-func getString(data map[string]interface{}, key string) string {
-	if val, ok := data[key]; ok {
-		if str, ok := val.(string); ok {
-			return str
-		}
-	}
-	return ""
-}
-
-func getStringOrDefault(data map[string]interface{}, key, defaultValue string) string {
-	if str := getString(data, key); str != "" {
-		return str
-	}
-	return defaultValue
-}
-
-func getInt(data map[string]interface{}, key string) int {
-	if val, ok := data[key]; ok {
-		switch v := val.(type) {
-		case float64:
-			return int(v)
-		case int:
-			return v
-		case string:
-			if intVal, err := strconv.Atoi(v); err == nil {
-				return intVal
-			}
-		}
-	}
-	return 0
 }
 
 func (pt *ProxyTester) LoadConfigsFromJSON(filePath string, protocol ProxyProtocol) ([]ProxyConfig, error) {
@@ -954,33 +1005,33 @@ func (pt *ProxyTester) LoadConfigsFromJSON(filePath string, protocol ProxyProtoc
 	}
 	defer file.Close()
 
+	seenHashes := make(map[string]bool)
+
 	log.Printf("Loading %s configurations from: %s", protocol, filePath)
 
 	switch protocol {
 	case ProtocolShadowsocks:
-		return pt.loadShadowsocksConfigsFromReader(file)
+		return pt.loadShadowsocksConfigsFromReader(file, seenHashes)
 	case ProtocolShadowsocksR:
-		return pt.loadShadowsocksRConfigs(file)
+		return pt.loadShadowsocksRConfigs(file, seenHashes)
 	case ProtocolVMess:
-		return pt.loadVMessConfigsFromReader(file)
+		return pt.loadVMessConfigsFromReader(file, seenHashes)
 	case ProtocolVLESS:
-		return pt.loadVLessConfigs(file)
+		return pt.loadVLessConfigs(file, seenHashes)
 	case ProtocolTrojan:
-		return pt.loadTrojanConfigs(file)
+		return pt.loadTrojanConfigs(file, seenHashes)
 	case ProtocolHysteria:
-		return pt.loadHysteriaConfigs(file)
+		return pt.loadHysteriaConfigs(file, seenHashes)
 	case ProtocolHysteria2:
-		return pt.loadHysteria2Configs(file)
+		return pt.loadHysteria2Configs(file, seenHashes)
 	case ProtocolTUIC:
-		return pt.loadTUICConfigs(file)
+		return pt.loadTUICConfigs(file, seenHashes)
 	}
 
 	return nil, fmt.Errorf("unsupported protocol: %s", protocol)
 }
 
-// Helper: tries to decode as a JSON array first, then falls back to line-delimited JSON objects.
 func decodeJSONList[T any](r io.Reader) ([]T, error) {
-	// Read all bytes - small files expected for configs
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return nil, err
@@ -993,7 +1044,6 @@ func decodeJSONList[T any](r io.Reader) ([]T, error) {
 		return arr, nil
 	}
 
-	// Fallback: try line-delimited JSON
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -1004,7 +1054,6 @@ func decodeJSONList[T any](r io.Reader) ([]T, error) {
 		if err := json.Unmarshal([]byte(line), &item); err == nil {
 			arr = append(arr, item)
 		} else {
-			// ignore unparsable lines gracefully
 			continue
 		}
 	}
@@ -1014,7 +1063,7 @@ func decodeJSONList[T any](r io.Reader) ([]T, error) {
 	return arr, nil
 }
 
-func (pt *ProxyTester) loadShadowsocksConfigsFromReader(file *os.File) ([]ProxyConfig, error) {
+func (pt *ProxyTester) loadShadowsocksConfigsFromReader(file *os.File, seenHashes map[string]bool) ([]ProxyConfig, error) {
 	type SSConfig struct {
 		Server     string `json:"server"`
 		ServerPort int    `json:"server_port"`
@@ -1043,14 +1092,18 @@ func (pt *ProxyTester) loadShadowsocksConfigsFromReader(file *os.File) ([]ProxyC
 		}
 
 		if pt.isValidConfig(&config) {
-			configs = append(configs, config)
+			hash := pt.getConfigHash(&config)
+			if !seenHashes[hash] {
+				seenHashes[hash] = true
+				configs = append(configs, config)
+			}
 		}
 	}
 
 	return configs, nil
 }
 
-func (pt *ProxyTester) loadVMessConfigsFromReader(file *os.File) ([]ProxyConfig, error) {
+func (pt *ProxyTester) loadVMessConfigsFromReader(file *os.File, seenHashes map[string]bool) ([]ProxyConfig, error) {
 	type VMConfig struct {
 		Address  string `json:"address"`
 		Port     int    `json:"port"`
@@ -1099,14 +1152,18 @@ func (pt *ProxyTester) loadVMessConfigsFromReader(file *os.File) ([]ProxyConfig,
 		}
 
 		if pt.isValidConfig(&config) {
-			configs = append(configs, config)
+			hash := pt.getConfigHash(&config)
+			if !seenHashes[hash] {
+				seenHashes[hash] = true
+				configs = append(configs, config)
+			}
 		}
 	}
 
 	return configs, nil
 }
 
-func (pt *ProxyTester) loadVLessConfigs(file *os.File) ([]ProxyConfig, error) {
+func (pt *ProxyTester) loadVLessConfigs(file *os.File, seenHashes map[string]bool) ([]ProxyConfig, error) {
 	type VLConfig struct {
 		Address string `json:"address"`
 		Port    int    `json:"port"`
@@ -1122,7 +1179,6 @@ func (pt *ProxyTester) loadVLessConfigs(file *os.File) ([]ProxyConfig, error) {
 	var data []VLConfig
 	decoder := json.NewDecoder(file)
 	if err := decoder.Decode(&data); err != nil {
-		// fallback: try line-delimited
 		if _, err2 := file.Seek(0, io.SeekStart); err2 == nil {
 			if arr, err3 := decodeJSONList[VLConfig](file); err3 == nil {
 				data = arr
@@ -1151,14 +1207,18 @@ func (pt *ProxyTester) loadVLessConfigs(file *os.File) ([]ProxyConfig, error) {
 		}
 
 		if pt.isValidConfig(&config) {
-			configs = append(configs, config)
+			hash := pt.getConfigHash(&config)
+			if !seenHashes[hash] {
+				seenHashes[hash] = true
+				configs = append(configs, config)
+			}
 		}
 	}
 
 	return configs, nil
 }
 
-func (pt *ProxyTester) loadShadowsocksRConfigs(file *os.File) ([]ProxyConfig, error) {
+func (pt *ProxyTester) loadShadowsocksRConfigs(file *os.File, seenHashes map[string]bool) ([]ProxyConfig, error) {
 	type SSRConfig struct {
 		Server        string `json:"server"`
 		ServerPort    int    `json:"server_port"`
@@ -1174,7 +1234,6 @@ func (pt *ProxyTester) loadShadowsocksRConfigs(file *os.File) ([]ProxyConfig, er
 	var data []SSRConfig
 	decoder := json.NewDecoder(file)
 	if err := decoder.Decode(&data); err != nil {
-		// fallback
 		if _, err2 := file.Seek(0, io.SeekStart); err2 == nil {
 			if arr, err3 := decodeJSONList[SSRConfig](file); err3 == nil {
 				data = arr
@@ -1202,14 +1261,18 @@ func (pt *ProxyTester) loadShadowsocksRConfigs(file *os.File) ([]ProxyConfig, er
 		}
 
 		if pt.isValidConfig(&config) {
-			configs = append(configs, config)
+			hash := pt.getConfigHash(&config)
+			if !seenHashes[hash] {
+				seenHashes[hash] = true
+				configs = append(configs, config)
+			}
 		}
 	}
 
 	return configs, nil
 }
 
-func (pt *ProxyTester) loadTrojanConfigs(file *os.File) ([]ProxyConfig, error) {
+func (pt *ProxyTester) loadTrojanConfigs(file *os.File, seenHashes map[string]bool) ([]ProxyConfig, error) {
 	type TrojanConfig struct {
 		Address     string `json:"address"`
 		Port        int    `json:"port"`
@@ -1226,7 +1289,6 @@ func (pt *ProxyTester) loadTrojanConfigs(file *os.File) ([]ProxyConfig, error) {
 	var data []TrojanConfig
 	decoder := json.NewDecoder(file)
 	if err := decoder.Decode(&data); err != nil {
-		// fallback
 		if _, err2 := file.Seek(0, io.SeekStart); err2 == nil {
 			if arr, err3 := decodeJSONList[TrojanConfig](file); err3 == nil {
 				data = arr
@@ -1260,14 +1322,18 @@ func (pt *ProxyTester) loadTrojanConfigs(file *os.File) ([]ProxyConfig, error) {
 		}
 
 		if pt.isValidConfig(&config) {
-			configs = append(configs, config)
+			hash := pt.getConfigHash(&config)
+			if !seenHashes[hash] {
+				seenHashes[hash] = true
+				configs = append(configs, config)
+			}
 		}
 	}
 
 	return configs, nil
 }
 
-func (pt *ProxyTester) loadHysteriaConfigs(file *os.File) ([]ProxyConfig, error) {
+func (pt *ProxyTester) loadHysteriaConfigs(file *os.File, seenHashes map[string]bool) ([]ProxyConfig, error) {
 	type HysteriaConfig struct {
 		Address  string `json:"address"`
 		Port     int    `json:"port"`
@@ -1285,7 +1351,6 @@ func (pt *ProxyTester) loadHysteriaConfigs(file *os.File) ([]ProxyConfig, error)
 	var data []HysteriaConfig
 	decoder := json.NewDecoder(file)
 	if err := decoder.Decode(&data); err != nil {
-		// fallback
 		if _, err2 := file.Seek(0, io.SeekStart); err2 == nil {
 			if arr, err3 := decodeJSONList[HysteriaConfig](file); err3 == nil {
 				data = arr
@@ -1339,14 +1404,18 @@ func (pt *ProxyTester) loadHysteriaConfigs(file *os.File) ([]ProxyConfig, error)
 		}
 
 		if pt.isValidConfig(&config) {
-			configs = append(configs, config)
+			hash := pt.getConfigHash(&config)
+			if !seenHashes[hash] {
+				seenHashes[hash] = true
+				configs = append(configs, config)
+			}
 		}
 	}
 
 	return configs, nil
 }
 
-func (pt *ProxyTester) loadHysteria2Configs(file *os.File) ([]ProxyConfig, error) {
+func (pt *ProxyTester) loadHysteria2Configs(file *os.File, seenHashes map[string]bool) ([]ProxyConfig, error) {
 	type Hysteria2Config struct {
 		Address  string `json:"address"`
 		Port     int    `json:"port"`
@@ -1360,7 +1429,6 @@ func (pt *ProxyTester) loadHysteria2Configs(file *os.File) ([]ProxyConfig, error
 	var data []Hysteria2Config
 	decoder := json.NewDecoder(file)
 	if err := decoder.Decode(&data); err != nil {
-		// fallback
 		if _, err2 := file.Seek(0, io.SeekStart); err2 == nil {
 			if arr, err3 := decodeJSONList[Hysteria2Config](file); err3 == nil {
 				data = arr
@@ -1392,14 +1460,18 @@ func (pt *ProxyTester) loadHysteria2Configs(file *os.File) ([]ProxyConfig, error
 		}
 
 		if pt.isValidConfig(&config) {
-			configs = append(configs, config)
+			hash := pt.getConfigHash(&config)
+			if !seenHashes[hash] {
+				seenHashes[hash] = true
+				configs = append(configs, config)
+			}
 		}
 	}
 
 	return configs, nil
 }
 
-func (pt *ProxyTester) loadTUICConfigs(file *os.File) ([]ProxyConfig, error) {
+func (pt *ProxyTester) loadTUICConfigs(file *os.File, seenHashes map[string]bool) ([]ProxyConfig, error) {
 	type TUICConfig struct {
 		Address          string `json:"address"`
 		Port             int    `json:"port"`
@@ -1415,7 +1487,6 @@ func (pt *ProxyTester) loadTUICConfigs(file *os.File) ([]ProxyConfig, error) {
 	var data []TUICConfig
 	decoder := json.NewDecoder(file)
 	if err := decoder.Decode(&data); err != nil {
-		// fallback
 		if _, err2 := file.Seek(0, io.SeekStart); err2 == nil {
 			if arr, err3 := decodeJSONList[TUICConfig](file); err3 == nil {
 				data = arr
@@ -1449,7 +1520,11 @@ func (pt *ProxyTester) loadTUICConfigs(file *os.File) ([]ProxyConfig, error) {
 		}
 
 		if pt.isValidConfig(&config) {
-			configs = append(configs, config)
+			hash := pt.getConfigHash(&config)
+			if !seenHashes[hash] {
+				seenHashes[hash] = true
+				configs = append(configs, config)
+			}
 		}
 	}
 
@@ -1488,7 +1563,30 @@ func (pt *ProxyTester) isValidConfig(config *ProxyConfig) bool {
 	return false
 }
 
+func (pt *ProxyTester) getConfigHash(config *ProxyConfig) string {
+	var hashStr string
+	switch config.Protocol {
+	case ProtocolShadowsocks:
+		hashStr = fmt.Sprintf("ss://%s:%d:%s:%s", config.Server, config.Port, config.Method, config.Password)
+	case ProtocolShadowsocksR:
+		hashStr = fmt.Sprintf("ssr://%s:%d:%s:%s:%s:%s", config.Server, config.Port, config.Method, config.Password, config.Protocol_Param, config.Obfs)
+	case ProtocolVMess:
+		hashStr = fmt.Sprintf("vmess://%s:%d:%s:%d:%s", config.Server, config.Port, config.UUID, config.AlterID, config.Network)
+	case ProtocolVLESS:
+		hashStr = fmt.Sprintf("vless://%s:%d:%s:%s", config.Server, config.Port, config.UUID, config.Network)
+	case ProtocolTrojan:
+		hashStr = fmt.Sprintf("trojan://%s:%d:%s:%s", config.Server, config.Port, config.Password, config.Network)
+	case ProtocolHysteria:
+		hashStr = fmt.Sprintf("hysteria://%s:%d:%s", config.Server, config.Port, config.AuthStr)
+	case ProtocolHysteria2:
+		hashStr = fmt.Sprintf("hysteria2://%s:%d:%s", config.Server, config.Port, config.Password)
+	case ProtocolTUIC:
+		hashStr = fmt.Sprintf("tuic://%s:%d:%s:%s", config.Server, config.Port, config.UUID, config.Password)
+	}
 
+	hash := md5.Sum([]byte(hashStr))
+	return fmt.Sprintf("%x", hash)
+}
 
 func (pt *ProxyTester) TestSingleConfig(config *ProxyConfig, batchID int) *TestResultData {
 	startTime := time.Now()
@@ -1504,7 +1602,6 @@ func (pt *ProxyTester) TestSingleConfig(config *ProxyConfig, batchID int) *TestR
 	defer func() {
 		result.TestTime = time.Since(startTime).Seconds()
 
-		// Clean up temp files and release port
 		if configFile != "" {
 			os.Remove(configFile)
 		}
@@ -1548,12 +1645,10 @@ func (pt *ProxyTester) TestSingleConfig(config *ProxyConfig, batchID int) *TestR
 		return result
 	}
 
-	// Register and ensure we try to stop the process after testing to avoid accumulation
 	if process.Process != nil {
 		pt.processManager.RegisterProcess(process.Process.Pid, process)
 	}
 
-	// Wait for the local socks inbound to be responsive with a short timeout
 	readyBy := time.Now().Add(3 * time.Second)
 	for !pt.networkTester.isProxyResponsive(proxyPort) && time.Now().Before(readyBy) {
 		time.Sleep(100 * time.Millisecond)
@@ -1562,7 +1657,6 @@ func (pt *ProxyTester) TestSingleConfig(config *ProxyConfig, batchID int) *TestR
 	if process.ProcessState != nil && process.ProcessState.Exited() {
 		result.Result = ResultConnectionError
 		result.ErrorMessage = "Xray process terminated"
-		// Ensure process cleaned up
 		if process.Process != nil {
 			pt.processManager.KillProcess(process.Process.Pid)
 		}
@@ -1575,6 +1669,18 @@ func (pt *ProxyTester) TestSingleConfig(config *ProxyConfig, batchID int) *TestR
 		result.ExternalIP = externalIP
 		result.ResponseTime = &responseTime
 
+		if externalIP != "" {
+			geoInfo, err := pt.networkTester.GetCountryInfo(externalIP)
+			if err == nil {
+				result.CountryCode = geoInfo.CountryCode
+				result.CountryName = geoInfo.CountryName
+				result.CountryFlag = geoInfo.CountryFlag
+				log.Printf("Country detected: %s %s", geoInfo.CountryFlag, geoInfo.CountryName)
+			} else {
+				log.Printf("GeoIP lookup failed: %v", err)
+			}
+		}
+
 		if pt.config.IncrementalSave {
 			pt.saveConfigImmediately(result)
 		}
@@ -1585,10 +1691,8 @@ func (pt *ProxyTester) TestSingleConfig(config *ProxyConfig, batchID int) *TestR
 		result.ErrorMessage = "Network test failed"
 	}
 
-	// Ensure we stop this xray process after testing to free resources promptly
 	if process != nil && process.Process != nil {
 		_ = pt.processManager.KillProcess(process.Process.Pid)
-		// wait briefly for process to be reaped (bounded)
 		waitDeadline := time.Now().Add(2 * time.Second)
 		for pt.processManager.HasProcess(process.Process.Pid) && time.Now().Before(waitDeadline) {
 			time.Sleep(50 * time.Millisecond)
@@ -1619,11 +1723,9 @@ func (pt *ProxyTester) testConfigSyntax(configFile string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	// Run xray's syntax test; capture combined output for better diagnostics
 	cmd := exec.CommandContext(ctx, pt.configGenerator.xrayPath, "run", "-test", "-config", configFile)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		// include output for debugging
 		return fmt.Errorf("syntax test failed: %s", strings.TrimSpace(string(output)))
 	}
 
@@ -1633,15 +1735,10 @@ func (pt *ProxyTester) testConfigSyntax(configFile string) error {
 func (pt *ProxyTester) startXrayProcess(configFile string) (*exec.Cmd, error) {
 	cmd := exec.Command(pt.configGenerator.xrayPath, "run", "-config", configFile)
 
-	// Avoid writing logs to parent stdout/stderr.
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 
-	// On Unix, set new process group so group-kill is possible if needed.
 	if runtime.GOOS != "windows" {
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			Setpgid: true,
-		}
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -1657,38 +1754,57 @@ func (pt *ProxyTester) saveConfigImmediately(result *TestResultData) {
 	}
 
 	protocol := result.Config.Protocol
-
-	// Increment counter once for this config
-	pt.counterMu.Lock()
-	pt.configCounter++
-	counter := pt.configCounter
-	pt.counterMu.Unlock()
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
 
 	if file, ok := pt.outputFiles[protocol]; ok {
 		configLine := pt.createWorkingConfigLine(result)
-		fmt.Fprintf(file, "%s\n", configLine)
+		if result.CountryFlag != "" && result.CountryName != "" {
+			fmt.Fprintf(file, "# Tested at: %s | Response: %.3fs | IP: %s | Country: %s %s\n",
+				timestamp, *result.ResponseTime, result.ExternalIP, result.CountryFlag, result.CountryName)
+		} else {
+			fmt.Fprintf(file, "# Tested at: %s | Response: %.3fs | IP: %s\n",
+				timestamp, *result.ResponseTime, result.ExternalIP)
+		}
+		fmt.Fprintf(file, "%s\n\n", configLine)
 		file.Sync()
 	}
 
 	if file, ok := pt.urlFiles[protocol]; ok {
 		configURL := pt.createConfigURL(result)
-		// Add fire emoji name to protocol-specific files too
-		configURL = pt.addConfigName(configURL, fmt.Sprintf("🔥%d🔥", counter))
-		fmt.Fprintf(file, "%s\n", configURL)
+		if result.CountryFlag != "" && result.CountryName != "" {
+			fmt.Fprintf(file, "# Tested at: %s | Response: %.3fs | IP: %s | Country: %s %s\n",
+				timestamp, *result.ResponseTime, result.ExternalIP, result.CountryFlag, result.CountryName)
+		} else {
+			fmt.Fprintf(file, "# Tested at: %s | Response: %.3fs | IP: %s\n",
+				timestamp, *result.ResponseTime, result.ExternalIP)
+		}
+		fmt.Fprintf(file, "%s\n\n", configURL)
 		file.Sync()
 	}
 
 	if pt.generalJSONFile != nil {
 		configLine := pt.createWorkingConfigLine(result)
-		fmt.Fprintf(pt.generalJSONFile, "%s\n", configLine)
+		if result.CountryFlag != "" && result.CountryName != "" {
+			fmt.Fprintf(pt.generalJSONFile, "# [%s] Tested at: %s | Response: %.3fs | IP: %s | Country: %s %s\n",
+				strings.ToUpper(string(protocol)), timestamp, *result.ResponseTime, result.ExternalIP, result.CountryFlag, result.CountryName)
+		} else {
+			fmt.Fprintf(pt.generalJSONFile, "# [%s] Tested at: %s | Response: %.3fs | IP: %s\n",
+				strings.ToUpper(string(protocol)), timestamp, *result.ResponseTime, result.ExternalIP)
+		}
+		fmt.Fprintf(pt.generalJSONFile, "%s\n\n", configLine)
 		pt.generalJSONFile.Sync()
 	}
 
 	if pt.generalURLFile != nil {
 		configURL := pt.createConfigURL(result)
-		// Add name with fire emoji and number
-		configURL = pt.addConfigName(configURL, fmt.Sprintf("🔥%d🔥", counter))
-		fmt.Fprintf(pt.generalURLFile, "%s\n", configURL)
+		if result.CountryFlag != "" && result.CountryName != "" {
+			fmt.Fprintf(pt.generalURLFile, "# [%s] Tested at: %s | Response: %.3fs | IP: %s | Country: %s %s\n",
+				strings.ToUpper(string(protocol)), timestamp, *result.ResponseTime, result.ExternalIP, result.CountryFlag, result.CountryName)
+		} else {
+			fmt.Fprintf(pt.generalURLFile, "# [%s] Tested at: %s | Response: %.3fs | IP: %s\n",
+				strings.ToUpper(string(protocol)), timestamp, *result.ResponseTime, result.ExternalIP)
+		}
+		fmt.Fprintf(pt.generalURLFile, "%s\n\n", configURL)
 		pt.generalURLFile.Sync()
 	}
 }
@@ -1764,47 +1880,35 @@ func (pt *ProxyTester) createWorkingConfigLine(result *TestResultData) string {
 	return string(jsonBytes)
 }
 
-func (pt *ProxyTester) addConfigName(configURL, name string) string {
-	// Replace the fragment (part after #) with the new name
-	if idx := strings.Index(configURL, "#"); idx != -1 {
-		return configURL[:idx] + "#" + url.QueryEscape(name)
-	}
-	// If no fragment exists, add it
-	return configURL + "#" + url.QueryEscape(name)
-}
-
 func (pt *ProxyTester) createConfigURL(result *TestResultData) string {
 	config := &result.Config
+	remarks := result.CountryFlag
 
 	switch config.Protocol {
 	case ProtocolShadowsocks:
 		auth := fmt.Sprintf("%s:%s", config.Method, config.Password)
 		authB64 := base64.StdEncoding.EncodeToString([]byte(auth))
-		remarks := url.QueryEscape(config.Remarks)
-		if remarks == "" {
-			remarks = fmt.Sprintf("SS-%s", config.Server)
-		}
-		return fmt.Sprintf("ss://%s@%s:%d#%s", authB64, config.Server, config.Port, remarks)
+		return fmt.Sprintf("ss://%s@%s:%d#%s", authB64, config.Server, config.Port, url.QueryEscape(remarks))
 
 	case ProtocolShadowsocksR:
-		remarks := url.QueryEscape(config.Remarks)
-		if remarks == "" {
-			remarks = fmt.Sprintf("SSR-%s", config.Server)
-		}
 		ssrStr := fmt.Sprintf("%s:%d:%s:%s:%s:%s", config.Server, config.Port, config.Protocol_Param, config.Method, config.Obfs, base64.URLEncoding.EncodeToString([]byte(config.Password)))
+		queryParams := []string{}
 		if config.ObfsParam != "" {
-			ssrStr += "/?obfsparam=" + base64.URLEncoding.EncodeToString([]byte(config.ObfsParam))
+			queryParams = append(queryParams, "obfsparam="+base64.URLEncoding.EncodeToString([]byte(config.ObfsParam)))
 		}
 		if config.Protocol_Param != "" {
-			ssrStr += "&protoparam=" + base64.URLEncoding.EncodeToString([]byte(config.Protocol_Param))
+			queryParams = append(queryParams, "protoparam="+base64.URLEncoding.EncodeToString([]byte(config.Protocol_Param)))
 		}
-		ssrStr += "&remarks=" + base64.URLEncoding.EncodeToString([]byte(config.Remarks))
+		queryParams = append(queryParams, "remarks="+base64.URLEncoding.EncodeToString([]byte(remarks)))
+		if len(queryParams) > 0 {
+			ssrStr += "/?" + strings.Join(queryParams, "&")
+		}
 		return fmt.Sprintf("ssr://%s", base64.URLEncoding.EncodeToString([]byte(ssrStr)))
 
 	case ProtocolVMess:
 		vmessConfig := map[string]interface{}{
 			"v":    "2",
-			"ps":   config.Remarks,
+			"ps":   remarks,
 			"add":  config.Server,
 			"port": strconv.Itoa(config.Port),
 			"id":   config.UUID,
@@ -1818,10 +1922,6 @@ func (pt *ProxyTester) createConfigURL(result *TestResultData) string {
 			"sni":  config.SNI,
 			"alpn": config.ALPN,
 		}
-		if vmessConfig["ps"] == "" {
-			vmessConfig["ps"] = fmt.Sprintf("VMess-%s", config.Server)
-		}
-
 		jsonBytes, _ := json.Marshal(vmessConfig)
 		vmessB64 := base64.StdEncoding.EncodeToString(jsonBytes)
 		return fmt.Sprintf("vmess://%s", vmessB64)
@@ -1858,18 +1958,11 @@ func (pt *ProxyTester) createConfigURL(result *TestResultData) string {
 		if config.Fingerprint != "" {
 			params.Add("fp", config.Fingerprint)
 		}
-
 		query := ""
 		if len(params) > 0 {
 			query = "?" + params.Encode()
 		}
-
-		remarks := url.QueryEscape(config.Remarks)
-		if remarks == "" {
-			remarks = fmt.Sprintf("VLESS-%s", config.Server)
-		}
-
-		return fmt.Sprintf("vless://%s@%s:%d%s#%s", config.UUID, config.Server, config.Port, query, remarks)
+		return fmt.Sprintf("vless://%s@%s:%d%s#%s", config.UUID, config.Server, config.Port, query, url.QueryEscape(remarks))
 
 	case ProtocolTrojan:
 		params := url.Values{}
@@ -1894,18 +1987,11 @@ func (pt *ProxyTester) createConfigURL(result *TestResultData) string {
 		if config.Fingerprint != "" {
 			params.Add("fp", config.Fingerprint)
 		}
-
 		query := ""
 		if len(params) > 0 {
 			query = "?" + params.Encode()
 		}
-
-		remarks := url.QueryEscape(config.Remarks)
-		if remarks == "" {
-			remarks = fmt.Sprintf("Trojan-%s", config.Server)
-		}
-
-		return fmt.Sprintf("trojan://%s@%s:%d%s#%s", config.Password, config.Server, config.Port, query, remarks)
+		return fmt.Sprintf("trojan://%s@%s:%d%s#%s", config.Password, config.Server, config.Port, query, url.QueryEscape(remarks))
 
 	case ProtocolHysteria:
 		params := url.Values{}
@@ -1927,18 +2013,11 @@ func (pt *ProxyTester) createConfigURL(result *TestResultData) string {
 		if config.Insecure {
 			params.Add("insecure", "1")
 		}
-
 		query := ""
 		if len(params) > 0 {
 			query = "?" + params.Encode()
 		}
-
-		remarks := url.QueryEscape(config.Remarks)
-		if remarks == "" {
-			remarks = fmt.Sprintf("Hysteria-%s", config.Server)
-		}
-
-		return fmt.Sprintf("hysteria://%s@%s:%d%s#%s", config.AuthStr, config.Server, config.Port, query, remarks)
+		return fmt.Sprintf("hysteria://%s@%s:%d%s#%s", config.AuthStr, config.Server, config.Port, query, url.QueryEscape(remarks))
 
 	case ProtocolHysteria2:
 		params := url.Values{}
@@ -1951,18 +2030,11 @@ func (pt *ProxyTester) createConfigURL(result *TestResultData) string {
 		if config.Insecure {
 			params.Add("insecure", "1")
 		}
-
 		query := ""
 		if len(params) > 0 {
 			query = "?" + params.Encode()
 		}
-
-		remarks := url.QueryEscape(config.Remarks)
-		if remarks == "" {
-			remarks = fmt.Sprintf("Hysteria2-%s", config.Server)
-		}
-
-		return fmt.Sprintf("hysteria2://%s@%s:%d%s#%s", config.Password, config.Server, config.Port, query, remarks)
+		return fmt.Sprintf("hysteria2://%s@%s:%d%s#%s", config.Password, config.Server, config.Port, query, url.QueryEscape(remarks))
 
 	case ProtocolTUIC:
 		params := url.Values{}
@@ -1978,22 +2050,16 @@ func (pt *ProxyTester) createConfigURL(result *TestResultData) string {
 		if config.Insecure {
 			params.Add("allow_insecure", "1")
 		}
-
 		query := ""
 		if len(params) > 0 {
 			query = "?" + params.Encode()
 		}
-
-		remarks := url.QueryEscape(config.Remarks)
-		if remarks == "" {
-			remarks = fmt.Sprintf("TUIC-%s", config.Server)
-		}
-
-		return fmt.Sprintf("tuic://%s:%s@%s:%d%s#%s", config.UUID, config.Password, config.Server, config.Port, query, remarks)
+		return fmt.Sprintf("tuic://%s:%s@%s:%d%s#%s", config.UUID, config.Password, config.Server, config.Port, query, url.QueryEscape(remarks))
 	}
 
 	return fmt.Sprintf("%s://%s:%d", config.Protocol, config.Server, config.Port)
 }
+
 
 func (pt *ProxyTester) updateStats(result *TestResultData) {
 	if protocolStats, ok := pt.stats.Load(result.Config.Protocol); ok {
@@ -2030,19 +2096,6 @@ func (pt *ProxyTester) updateStats(result *TestResultData) {
 			atomic.AddInt64(stats["failed"], 1)
 		default:
 			atomic.AddInt64(stats["failed"], 1)
-		}
-	}
-
-	// Update per-source statistics
-	if result.Config.Source != "" {
-		value, _ := pt.sourceStats.LoadOrStore(result.Config.Source, &SourceStats{})
-		srcStats := value.(*SourceStats)
-
-		atomic.AddInt64(&srcStats.TotalConfigs, 1)
-		if result.Result == ResultSuccess {
-			atomic.AddInt64(&srcStats.SuccessConfigs, 1)
-		} else {
-			atomic.AddInt64(&srcStats.FailedConfigs, 1)
 		}
 	}
 }
@@ -2139,16 +2192,13 @@ func (pt *ProxyTester) RunTests(configs []ProxyConfig) []*TestResultData {
 
 		pt.saveResults(allResults)
 
-		// Report system status after batch completion
 		pt.reportSystemStatus(batchID)
 
-		// Cleanup resources between batches
 		if end < totalConfigs {
 			pt.cleanupBetweenBatches()
 
-			// Add 10-second rest between batches
-			log.Printf("⏸️  Resting for 5 seconds before next batch...")
-			time.Sleep(5 * time.Second)
+			log.Printf("⏸️  Resting for 10 seconds before next batch...")
+			time.Sleep(10 * time.Second)
 		}
 	}
 
@@ -2178,9 +2228,7 @@ func (pt *ProxyTester) getSystemMemoryUsage() (used uint64, total uint64, err er
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 
-	// Get system memory on different platforms
 	if runtime.GOOS == "windows" {
-		// On Windows, use PowerShell to get total and used RAM
 		cmdUsed := exec.Command("powershell", "-Command", "(Get-Process | Measure-Object WorkingSet64 -Sum).Sum / 1MB")
 		outputUsed, errUsed := cmdUsed.Output()
 
@@ -2195,7 +2243,6 @@ func (pt *ProxyTester) getSystemMemoryUsage() (used uint64, total uint64, err er
 			}
 		}
 	} else {
-		// On Linux/Unix, read from /proc/meminfo or free command
 		cmd := exec.Command("sh", "-c", "free -m | awk '/^Mem:/ {print $3, $2}'")
 		output, cmdErr := cmd.Output()
 		if cmdErr == nil {
@@ -2210,7 +2257,6 @@ func (pt *ProxyTester) getSystemMemoryUsage() (used uint64, total uint64, err er
 		}
 	}
 
-	// Fallback to current process memory
 	return m.Alloc / 1024 / 1024, 0, nil
 }
 
@@ -2218,10 +2264,8 @@ func (pt *ProxyTester) countXrayCoreProcesses() int {
 	var cmd *exec.Cmd
 
 	if runtime.GOOS == "windows" {
-		// On Windows, use tasklist
 		cmd = exec.Command("powershell", "-Command", "(Get-Process -Name '*xray*' -ErrorAction SilentlyContinue | Measure-Object).Count")
 	} else {
-		// On Linux/Unix, use ps and grep
 		cmd = exec.Command("sh", "-c", "ps aux | grep -i xray | grep -v grep | wc -l")
 	}
 
@@ -2242,17 +2286,14 @@ func (pt *ProxyTester) cleanupBetweenBatches() {
 	log.Println(strings.Repeat("-", 70))
 	log.Println(" Cleaning up resources before next batch...")
 
-	// Count tracked processes before cleanup
 	trackedProcessesBefore := pt.processManager.GetProcessCount()
 	systemProcessesBefore := pt.countXrayCoreProcesses()
 	log.Printf("   Tracked processes: %d", trackedProcessesBefore)
 	log.Printf("   System xray-core processes: %d", systemProcessesBefore)
 
-	// Stop all tracked xray-core processes
 	log.Println("   Force killing all tracked xray processes...")
 	killedCount := pt.processManager.ForceCleanupAll()
 
-	// Wait for processes to be reaped and fully terminate
 	log.Println("  ⏳ Waiting for processes to terminate...")
 	time.Sleep(2 * time.Second)
 
@@ -2268,7 +2309,6 @@ func (pt *ProxyTester) cleanupBetweenBatches() {
 		log.Printf("    System xray-core processes still running: %d", systemProcessesAfter)
 	}
 
-	// Release all used ports
 	log.Println("   Releasing all used ports...")
 	portsBefore := 0
 	pt.portManager.usedPorts.Range(func(key, value interface{}) bool {
@@ -2287,7 +2327,6 @@ func (pt *ProxyTester) cleanupBetweenBatches() {
 	log.Printf("   Used ports released: %d", portsBefore-portsAfter)
 	log.Printf("   Used ports remaining: %d", portsAfter)
 
-	// Force garbage collection to free memory
 	runtime.GC()
 	log.Println("    Garbage collection completed")
 
@@ -2300,7 +2339,6 @@ func (pt *ProxyTester) reportSystemStatus(batchID int) {
 	log.Printf(" System Status After Batch %d:", batchID)
 	log.Println(strings.Repeat("=", 70))
 
-	// Get memory usage
 	memUsed, memTotal, err := pt.getSystemMemoryUsage()
 	if err == nil {
 		if memTotal > 0 {
@@ -2314,7 +2352,6 @@ func (pt *ProxyTester) reportSystemStatus(batchID int) {
 		log.Printf(" RAM Usage: Unable to retrieve (Error: %v)", err)
 	}
 
-	// Count xray-core processes
 	processCount := pt.countXrayCoreProcesses()
 	log.Printf("🔧 Xray-core Processes: %d", processCount)
 
@@ -2359,43 +2396,6 @@ func (pt *ProxyTester) printFinalSummary(results []*TestResultData) {
 			}
 		}
 	}
-
-	// Display per-subscription statistics
-	log.Println("\nSubscription Source Breakdown:")
-	log.Println(strings.Repeat("-", 150))
-	log.Printf("%-120s | %8s | %8s | %8s | %8s", "Subscription URL", "Total", "Success", "Failed", "Success%")
-	log.Println(strings.Repeat("-", 150))
-
-	var totalSubConfigs, totalSubSuccess, totalSubFailed int64
-	pt.sourceStats.Range(func(key, value interface{}) bool {
-		source := key.(string)
-		stats := value.(*SourceStats)
-
-		total := atomic.LoadInt64(&stats.TotalConfigs)
-		success := atomic.LoadInt64(&stats.SuccessConfigs)
-		failed := atomic.LoadInt64(&stats.FailedConfigs)
-
-		totalSubConfigs += total
-		totalSubSuccess += success
-		totalSubFailed += failed
-
-		successPct := float64(0)
-		if total > 0 {
-			successPct = float64(success) / float64(total) * 100
-		}
-
-		log.Printf("%-120s | %8d | %8d | %8d | %7.1f%%",
-			source, total, success, failed, successPct)
-		return true
-	})
-
-	log.Println(strings.Repeat("-", 150))
-	overallSuccessPct := float64(0)
-	if totalSubConfigs > 0 {
-		overallSuccessPct = float64(totalSubSuccess) / float64(totalSubConfigs) * 100
-	}
-	log.Printf("%-120s | %8d | %8d | %8d | %7.1f%%",
-		"TOTAL", totalSubConfigs, totalSubSuccess, totalSubFailed, overallSuccessPct)
 
 	if len(successTimes) > 0 {
 		var sum float64
@@ -2462,7 +2462,6 @@ func setupDirectories(config *Config) error {
 }
 
 func init() {
-	// Seed RNG for port emergency selection and shuffling
 	rand.Seed(time.Now().UnixNano())
 }
 
@@ -2479,59 +2478,59 @@ func main() {
 	}
 	defer tester.Cleanup()
 
-	// Load all configs from Config directory
-	configDir := filepath.Join(config.DataDir, "Config")
-
-	log.Println(strings.Repeat("=", 70))
-	log.Printf(" Loading configurations from: %s", configDir)
-	log.Println(strings.Repeat("=", 70))
-
-	// Find all JSON files in Config directory
-	jsonFiles, err := filepath.Glob(filepath.Join(configDir, "*.json"))
-	if err != nil {
-		log.Fatalf("Failed to find config files: %v", err)
+	configFilesOrdered := []struct {
+		protocol ProxyProtocol
+		filePath string
+	}{
+		{ProtocolShadowsocks, filepath.Join(config.DataDir, "deduplicated_urls", "ss.json")},
+		{ProtocolShadowsocksR, filepath.Join(config.DataDir, "deduplicated_urls", "ssr.json")},
+		{ProtocolVMess, filepath.Join(config.DataDir, "deduplicated_urls", "vmess.json")},
+		{ProtocolVLESS, filepath.Join(config.DataDir, "deduplicated_urls", "vless.json")},
+		{ProtocolTrojan, filepath.Join(config.DataDir, "deduplicated_urls", "trojan.json")},
+		{ProtocolHysteria, filepath.Join(config.DataDir, "deduplicated_urls", "hy.json")},
+		{ProtocolHysteria2, filepath.Join(config.DataDir, "deduplicated_urls", "hysteria2.json")},
+		{ProtocolTUIC, filepath.Join(config.DataDir, "deduplicated_urls", "tuic.json")},
 	}
 
-	if len(jsonFiles) == 0 {
-		log.Printf("No JSON config files found in: %s", configDir)
-		log.Println("No working configurations found")
-		return
-	}
-
-	log.Printf("Found %d configuration files", len(jsonFiles))
-
-	// Load all configs
-	var allConfigs []ProxyConfig
-
-	for _, jsonFile := range jsonFiles {
-		config, err := tester.LoadConfigFromCollectorJSON(jsonFile)
-		if err != nil {
-			log.Printf("Failed to load %s: %v", filepath.Base(jsonFile), err)
-			continue
-		}
-		if config != nil {
-			allConfigs = append(allConfigs, *config)
-		}
-	}
-
-	if len(allConfigs) == 0 {
-		log.Println("No valid configurations could be loaded")
-		log.Println("No working configurations found")
-		return
-	}
-
-	log.Printf("Loaded %d valid configurations", len(allConfigs))
-	log.Println(strings.Repeat("=", 70))
-	log.Printf(" Starting tests for all configurations")
-	log.Println(strings.Repeat("=", 70))
-
-	// Test all configs
-	allResults := tester.RunTests(allConfigs)
-
+	var allResults []*TestResultData
 	totalWorkingConfigs := 0
-	for _, result := range allResults {
-		if result.Result == ResultSuccess {
-			totalWorkingConfigs++
+
+	for _, configFile := range configFilesOrdered {
+		protocol := configFile.protocol
+		filePath := configFile.filePath
+
+		log.Println(strings.Repeat("=", 70))
+		log.Printf(" Starting tests for %s protocol", strings.ToUpper(string(protocol)))
+		log.Println(strings.Repeat("=", 70))
+
+		if _, err := os.Stat(filePath); err == nil {
+			configs, err := tester.LoadConfigsFromJSON(filePath, protocol)
+			if err != nil {
+				log.Printf("Failed to load %s configs: %v", protocol, err)
+				continue
+			}
+
+			if len(configs) == 0 {
+				log.Printf("No valid %s configurations found", protocol)
+				continue
+			}
+
+			log.Printf("Testing %d %s configurations...", len(configs), protocol)
+
+			results := tester.RunTests(configs)
+			allResults = append(allResults, results...)
+
+			workingCount := 0
+			for _, result := range results {
+				if result.Result == ResultSuccess {
+					workingCount++
+				}
+			}
+			totalWorkingConfigs += workingCount
+
+			log.Printf(" %s testing completed: %d working configurations found", strings.ToUpper(string(protocol)), workingCount)
+		} else {
+			log.Printf("Config file not found: %s", filePath)
 		}
 	}
 
@@ -2542,8 +2541,8 @@ func main() {
 		log.Printf("\nWorking configurations saved to:")
 		log.Printf("  JSON: %s/working_json/working_*.txt", config.DataDir)
 		log.Printf("  URL: %s/working_url/working_*_urls.txt", config.DataDir)
-		log.Printf("  All configs (JSON): %s/working_json/all.txt", config.DataDir)
-		log.Printf("  All configs (URL): %s/working_url/all.txt", config.DataDir)
+		log.Printf("  All configs (JSON): %s/working_json/working_all_configs.txt", config.DataDir)
+		log.Printf("  All configs (URL): %s/working_url/working_all_urls.txt", config.DataDir)
 		log.Println(strings.Repeat("=", 70))
 	} else {
 		log.Println("No working configurations found")
