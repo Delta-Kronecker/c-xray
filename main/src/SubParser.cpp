@@ -55,6 +55,11 @@ std::shared_ptr<ProxyBean> SubParser::ParseSingleLink(const QString &str) {
         bean = std::make_shared<ShadowSocksBean>();
         if (!bean->TryParseLink(str)) return nullptr;
     }
+    // ShadowSocksR
+    else if (str.startsWith("ssr://")) {
+        bean = std::make_shared<ShadowSocksRBean>();
+        if (!bean->TryParseLink(str)) return nullptr;
+    }
     // Trojan
     else if (str.startsWith("trojan://")) {
         auto trojanBean = std::make_shared<TrojanVLESSBean>();
