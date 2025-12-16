@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -1301,7 +1300,6 @@ func (pt *ProxyTester) saveConfigImmediately(result *TestResultData) {
 
 	pt.counterMu.Lock()
 	pt.configCounter++
-	counter := pt.configCounter
 	pt.counterMu.Unlock()
 
 	if file, ok := pt.outputFiles[protocol]; ok {
