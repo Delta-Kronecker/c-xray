@@ -1,4 +1,0 @@
-# Working TUIC Configurations (URL Format)
-# Generated at: 2025-12-16 14:51:52
-# Format: Each line contains one working configuration as URL
-
