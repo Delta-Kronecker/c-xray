@@ -119,6 +119,49 @@ QJsonObject ShadowSocksBean::ToJson() {
     return obj;
 }
 
+// ShadowSocksR Parser
+bool ShadowSocksRBean::TryParseLink(const QString &link) {
+    type = "ssr";
+    auto decoded = DecodeB64IfValid(SubStrAfter(link, "ssr://"), QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
+    if (decoded.isEmpty()) return false;
+
+    auto mainPart = SubStrBefore(decoded, "/?");
+    auto queryPart = SubStrAfter(decoded, "/?");
+
+    auto parts = mainPart.split(':');
+    if (parts.size() < 6) return false;
+
+    serverAddress = parts[0];
+    serverPort = parts[1].toInt();
+    protocol = parts[2];
+    method = parts[3];
+    obfs = parts[4];
+    password = DecodeB64IfValid(parts[5], QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
+
+    QUrlQuery query(queryPart);
+    name = DecodeB64IfValid(query.queryItemValue("remarks"), QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
+    protocol_param = DecodeB64IfValid(query.queryItemValue("protoparam"), QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
+    obfs_param = DecodeB64IfValid(query.queryItemValue("obfsparam"), QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
+
+    return true;
+}
+
+QJsonObject ShadowSocksRBean::ToJson() {
+    QJsonObject obj;
+    obj["type"] = "ssr";
+    obj["name"] = name;
+    obj["server"] = serverAddress;
+    obj["port"] = serverPort;
+    obj["password"] = password;
+    obj["method"] = method;
+    obj["protocol"] = protocol;
+    obj["obfs"] = obfs;
+    if (!obfs_param.isEmpty()) obj["obfs_param"] = obfs_param;
+    if (!protocol_param.isEmpty()) obj["protocol_param"] = protocol_param;
+    if (!source.isEmpty()) obj["source"] = source;
+    return obj;
+}
+
 // Trojan/VLESS Parser
 bool TrojanVLESSBean::TryParseLink(const QString &link) {
     auto url = QUrl(link);
