@@ -278,14 +278,11 @@ func NewNetworkTester(timeout time.Duration) *NetworkTester {
 	return &NetworkTester{
 		timeout: timeout,
 		testURLs: []string{
-			"http://httpbin.org/ip",
-			"http://icanhazip.com",
-			"http://ifconfig.me/ip",
-			"http://api.ipify.org",
-			"http://ipinfo.io/ip",
-			"http://checkip.amazonaws.com",
-			"https://httpbin.org/ip",
-			"https://icanhazip.com",
+			"http://connectivitycheck.gstatic.com/generate_204",
+			"http://www.gstatic.com/generate_204",
+			"http://cp.cloudflare.com",
+			"http://detectportal.firefox.com",
+			"http://www.msftconnecttest.com/connecttest.txt",
 		},
 		client: &http.Client{Timeout: timeout},
 	}
