@@ -1,5 +1,0 @@
-# All Working Configurations (URL Format)
-# Generated at: 2025-12-16 14:51:52
-# Format: Each line contains one working configuration as URL
-# Protocols: Shadowsocks, ShadowsocksR, VMess, VLESS, Trojan, Hysteria, Hysteria2, TUIC
-
